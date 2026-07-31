@@ -1,0 +1,9 @@
+system demo
+
+component echo echo
+component uppercase uppercase
+
+publish uppercase tcp 127.0.0.1 50052 50051
+egress uppercase
+
+link uppercase.upstream echo.echo

@@ -1,0 +1,6 @@
+/bin/
+/dist/
+/graphify-out/
+/.dcomp/
+*.test
+coverage.out

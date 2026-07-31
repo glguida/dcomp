@@ -1,0 +1,2 @@
+docker dcomp-example-echo:dev
+output dcomp.example.v1.Echo echo

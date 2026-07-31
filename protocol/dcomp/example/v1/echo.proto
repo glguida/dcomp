@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package dcomp.example.v1;
+
+option go_package = "github.com/glguida/dcomp/gen/dcomp/example/v1;examplev1";
+
+// Echo is intentionally ordinary application gRPC. dcomp transports and
+// connects it without interpreting its messages.
+service Echo {
+  rpc Echo(EchoRequest) returns (EchoResponse);
+}
+
+message EchoRequest {
+  string text = 1;
+}
+
+message EchoResponse {
+  string text = 1;
+}

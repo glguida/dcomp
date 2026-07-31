@@ -1,0 +1,3 @@
+docker dcomp-example-uppercase:dev
+input dcomp.example.v1.Echo upstream
+output dcomp.example.v1.Echo echo
