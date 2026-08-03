@@ -112,6 +112,19 @@ DComp derives and verifies the Docker volume name. It does not adopt an
 arbitrary existing volume, and it does not delete declared volumes during
 replacement, `down`, or `abort`.
 
+Host tooling can request the physical Docker name without duplicating DComp's
+naming rules:
+
+```sh
+dcomp volume --json example frontend state
+```
+
+The lookup is read-only. It succeeds only when the exact local volume exists,
+the selected state root is bound to the current Docker engine, and all DComp
+ownership, system, component, and logical-name labels match. It also succeeds
+after `dcomp down example`, because persistent volumes intentionally outlive
+the deployment.
+
 `args` replaces the image's command argument array without changing its
 entrypoint:
 

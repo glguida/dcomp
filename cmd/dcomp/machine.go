@@ -30,6 +30,14 @@ type statusDocument struct {
 	Components  []componentStatusDocument `json:"components"`
 }
 
+type volumeDocument struct {
+	APIVersion  int    `json:"api_version"`
+	System      string `json:"system"`
+	Component   string `json:"component"`
+	LogicalName string `json:"logical_name"`
+	Name        string `json:"name"`
+}
+
 type networkStatusDocument struct {
 	Key      string `json:"key"`
 	ID       string `json:"id"`
@@ -100,6 +108,14 @@ func writeStatusJSON(output io.Writer, status lifecycle.Status) error {
 		document.Components = append(document.Components, item)
 	}
 	return writeDocument(output, document)
+}
+
+func writeVolumeJSON(output io.Writer, volume lifecycle.PersistentVolume) error {
+	return writeDocument(output, volumeDocument{
+		APIVersion: apiVersion, System: volume.System,
+		Component: volume.Component, LogicalName: volume.LogicalName,
+		Name: volume.Name,
+	})
 }
 
 func writeDocument(output io.Writer, value interface{}) error {

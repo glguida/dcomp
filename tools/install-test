@@ -1,0 +1,103 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+temporary=$(mktemp -d "${TMPDIR:-/tmp}/dcomp-install.XXXXXX")
+stage="$temporary/stage root"
+expected="$temporary/expected"
+actual="$temporary/actual"
+
+cleanup() {
+    rm -rf "$temporary"
+}
+trap cleanup EXIT HUP INT TERM
+
+mkdir -p "$stage/usr/bin"
+chmod 0700 "$stage/usr/bin"
+
+make -C "$root" build
+make -C "$root" install "DESTDIR=$stage" PREFIX=/usr
+make -C "$root" install "DESTDIR=$stage" PREFIX=/usr
+
+cat >"$expected" <<'EOF'
+usr/bin/dcomp
+usr/bin/dcomp-healthcheck
+usr/share/doc/dcomp/LICENSE
+usr/share/doc/dcomp/README.md
+usr/share/doc/dcomp/docs/architecture.md
+usr/share/doc/dcomp/docs/component-contract.md
+usr/share/doc/dcomp/docs/lifecycle.md
+usr/share/doc/dcomp/docs/prior-art.md
+EOF
+
+(cd "$stage" && find . -type f -print) |
+    sed 's|^\./||' |
+    LC_ALL=C sort >"$actual"
+diff -u "$expected" "$actual"
+
+for file in \
+    "$stage/usr/bin/dcomp" \
+    "$stage/usr/bin/dcomp-healthcheck"
+do
+    [ "$(stat -c '%a' "$file")" = 755 ] || {
+        echo "install-test: executable has wrong mode: $file" >&2
+        exit 1
+    }
+done
+
+while IFS= read -r path
+do
+    case "$path" in
+        usr/bin/*) continue ;;
+    esac
+    file="$stage/$path"
+    [ "$(stat -c '%a' "$file")" = 644 ] || {
+        echo "install-test: documentation has wrong mode: $file" >&2
+        exit 1
+    }
+done <"$expected"
+
+for directory in \
+    "$stage/usr/share/doc/dcomp" \
+    "$stage/usr/share/doc/dcomp/docs"
+do
+    [ "$(stat -c '%a' "$directory")" = 755 ] || {
+        echo "install-test: directory has wrong mode: $directory" >&2
+        exit 1
+    }
+done
+[ "$(stat -c '%a' "$stage/usr/bin")" = 700 ] || {
+    echo "install-test: install changed an existing directory mode" >&2
+    exit 1
+}
+
+"$stage/usr/bin/dcomp" version --json >"$temporary/version"
+[ -s "$temporary/version" ]
+
+if "$stage/usr/bin/dcomp-healthcheck" --timeout=0 \
+    2>"$temporary/healthcheck-error"
+then
+    echo "install-test: invalid health-check invocation succeeded" >&2
+    exit 1
+else
+    status=$?
+fi
+[ "$status" -eq 2 ]
+[ "$(cat "$temporary/healthcheck-error")" = \
+    'dcomp-healthcheck: timeout must be positive' ]
+
+printf '%s\n' keep >"$stage/usr/share/doc/dcomp/local-note"
+
+make -C "$root" uninstall "DESTDIR=$stage" PREFIX=/usr
+make -C "$root" uninstall "DESTDIR=$stage" PREFIX=/usr
+
+while IFS= read -r path
+do
+    [ ! -e "$stage/$path" ] || {
+        echo "install-test: uninstall left $path" >&2
+        exit 1
+    }
+done <"$expected"
+[ "$(cat "$stage/usr/share/doc/dcomp/local-note")" = keep ]
+
+echo "dcomp install: ok"

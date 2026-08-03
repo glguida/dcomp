@@ -174,6 +174,14 @@ Docker named volumes expose no immutable ID. DComp instead uses deterministic
 component-scoped names and verifies their driver and ownership labels before
 mounting them. Persistent volumes are never deleted implicitly.
 
+External host tooling does not reproduce that naming convention. The
+`dcomp volume [--json] SYSTEM COMPONENT LOGICAL` query constructs the name
+inside DComp, inspects the Docker object under the system's shared lifecycle
+lock, verifies the state-root engine binding and every expected label, and only
+then returns the physical Docker name. This remains valid after `down`, because
+the system lock and engine binding remain while the persistent volume is
+preserved.
+
 System names are host-wide Docker identities. A different host-side state root
 does not create another Docker namespace for the same system name.
 

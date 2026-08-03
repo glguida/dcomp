@@ -65,3 +65,19 @@ func TestWriteStatusJSONUsesArraysForAbsentSystem(t *testing.T) {
 		t.Fatalf("absent status JSON = %q, want %q", got, want)
 	}
 }
+
+func TestWriteVolumeJSONIsStableAndSelfDescribing(t *testing.T) {
+	var output bytes.Buffer
+	if err := writeVolumeJSON(&output, lifecycle.PersistentVolume{
+		System: "demo", Component: "worker", LogicalName: "state",
+		Name: "dcomp.demo.volume.worker.state",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	const want = "{\"api_version\":1,\"system\":\"demo\"," +
+		"\"component\":\"worker\",\"logical_name\":\"state\"," +
+		"\"name\":\"dcomp.demo.volume.worker.state\"}\n"
+	if got := output.String(); got != want {
+		t.Fatalf("volume JSON = %q, want %q", got, want)
+	}
+}

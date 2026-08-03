@@ -128,19 +128,53 @@ convention: gRPC multiplexing, standard gRPC health, reflection, link lookup,
 and bounded shutdown. These are helper-package features, not substrate
 requirements. Components may use any language and need not use that package.
 
-## Build and run
+## Install and run
 
-Requirements:
+Runtime requirements:
 
 - Linux;
-- Docker Engine 25 or newer (API 1.44+); and
-- Go 1.25 or newer to build DComp.
+- Docker Engine 25 or newer (API 1.44+).
 
-Build DComp:
+Building from source additionally requires Go 1.25.0 or newer. From a source
+checkout, build as the current user and install under `/usr/local`:
 
 ```sh
 make build
+sudo make install
 ```
+
+For an installation owned by the current user, choose a prefix already on the
+user's path:
+
+```sh
+make build
+make install PREFIX="$HOME/.local"
+```
+
+`make install` installs `dcomp`, the optional `dcomp-healthcheck` component
+probe, the licence, the project README, and the design documentation. It
+accepts conventional `PREFIX`, `BINDIR`, `DOCDIR`, and `DESTDIR` overrides.
+Installation only copies artifacts produced by `make build`; it never invokes
+the Go compiler or `sudo`. Package builders can stage an installation with,
+for example:
+
+```sh
+make build
+make install DESTDIR="$pkgdir" PREFIX=/usr
+```
+
+Remove exactly those installed files with the same path settings:
+
+```sh
+sudo make uninstall
+```
+
+The Go packages are consumed through the module system rather than copied into
+the installation. The example source, Dockerfiles, and example protobuf remain
+in the source distribution because they are development material, not DComp
+runtime data. Installing only the `dcomp` command through Go remains possible
+with `go install github.com/glguida/dcomp/cmd/dcomp@v0.1.0` after that version
+has been published.
 
 Build component images using the project's ordinary Docker tooling:
 
@@ -155,23 +189,32 @@ Engine. DComp does not build images, pull images, or infer build contexts.
 Then operate the complete system through its one entry file:
 
 ```sh
-bin/dcomp check system.dcomp
-bin/dcomp up system.dcomp
-bin/dcomp status document-system
-bin/dcomp status --json document-system
-bin/dcomp logs document-system
-bin/dcomp logs -f document-system filter
-bin/dcomp logs -f document-system
-bin/dcomp restart document-system filter
-bin/dcomp down document-system
+dcomp check system.dcomp
+dcomp up system.dcomp
+dcomp status document-system
+dcomp status --json document-system
+dcomp volume --json document-system filter cache
+dcomp logs document-system
+dcomp logs -f document-system filter
+dcomp logs -f document-system
+dcomp restart document-system filter
+dcomp down document-system
 ```
 
-Programs embedding the CLI must first check `bin/dcomp version --json`. Both
-that command and `status --json` include `api_version`; version 1 status is one
-JSON object with system state, network diagnostics, component state, and each
-component's effective `published_ports`. A non-operational system still emits
-the complete status object and exits 1. Human-readable `status` output remains
-intended for terminals.
+Programs embedding the CLI must first check `dcomp version --json`. The
+`version`, `status`, and `volume` JSON documents include `api_version`.
+Version 1 status is one JSON object with system state, network diagnostics,
+component state, and each component's effective `published_ports`. A
+non-operational system still emits the complete status object and exits 1.
+Human-readable `status` output remains intended for terminals.
+
+`dcomp volume [--json] SYSTEM COMPONENT LOGICAL` returns the deterministic
+Docker name only after inspecting that existing local volume and verifying its
+DComp owner, system, component, and logical-name labels. The version 1 JSON
+object contains exactly `api_version`, `system`, `component`, `logical_name`,
+and `name`. The command exits nonzero for an absent, foreign, or malformed
+volume. It remains available after `down`, when the system's persistent volumes
+survive but its component containers and networks no longer exist.
 
 `up` resolves image references to immutable IDs before changing Docker. It
 retains running components whose component digest is unchanged, reconciles
@@ -199,8 +242,8 @@ guesses and never performs speculative rollback.
 If the CLI or host stops during an operation, the operation remains explicit:
 
 ```sh
-bin/dcomp resume document-system
-bin/dcomp abort document-system
+dcomp resume document-system
+dcomp abort document-system
 ```
 
 `resume` continues from verified Docker facts. If a create result is
@@ -237,7 +280,9 @@ Host ports exist only for explicit `publish` directives.
 
 Bind mounts expose exactly the named host path with the declared access mode.
 Named volumes are created and verified by DComp and survive replacement,
-`down`, and `abort`; DComp never removes persistent data implicitly.
+`down`, and `abort`; DComp never removes persistent data implicitly. Use
+`dcomp volume SYSTEM COMPONENT LOGICAL` to obtain a verified Docker volume name
+for host-side backup or inspection tooling.
 
 DComp deliberately does not provide multi-host scheduling, replicas, automatic
 restart policy, configurable resource limits, secret injection, arbitrary

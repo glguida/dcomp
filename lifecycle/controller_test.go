@@ -367,6 +367,15 @@ func TestPersistentVolumeSurvivesReplacementAndDown(t *testing.T) {
 	if got := fake.volumes[volume]; !reflect.DeepEqual(got, firstVolume) {
 		t.Fatalf("volume changed during down:\n got: %#v\nwant: %#v", got, firstVolume)
 	}
+	inspected, err := controller.InspectPersistentVolume(
+		context.Background(), "storage", "worker", "data",
+	)
+	if err != nil {
+		t.Fatalf("inspect persistent volume after down: %v", err)
+	}
+	if inspected.Name != volume {
+		t.Fatalf("volume after down = %q, want %q", inspected.Name, volume)
+	}
 	if len(fake.containers) != 0 || len(fake.networks) != 0 {
 		t.Fatalf("down left transient resources: containers=%#v networks=%#v",
 			fake.containers, fake.networks)

@@ -25,6 +25,7 @@ Usage:
   dcomp [--state-root DIR] check FILE
   dcomp [--state-root DIR] up FILE
   dcomp [--state-root DIR] status [--json] NAME
+  dcomp [--state-root DIR] volume [--json] SYSTEM COMPONENT LOGICAL
   dcomp [--state-root DIR] logs [-f|--follow] NAME [COMPONENT...]
   dcomp [--state-root DIR] restart NAME [COMPONENT...]
   dcomp [--state-root DIR] down NAME
@@ -149,6 +150,32 @@ func run(arguments []string) int {
 		}
 		if !status.Operational() {
 			return 1
+		}
+	case "volume":
+		volumeFlags := flag.NewFlagSet("dcomp volume", flag.ContinueOnError)
+		volumeFlags.SetOutput(os.Stderr)
+		jsonOutput := volumeFlags.Bool("json", false, "emit stable machine-readable JSON")
+		if err := volumeFlags.Parse(commandArgs); err != nil {
+			return 2
+		}
+		if volumeFlags.NArg() != 3 {
+			return commandUsage("volume expects SYSTEM COMPONENT LOGICAL")
+		}
+		volume, err := controller.InspectPersistentVolume(
+			ctx,
+			volumeFlags.Arg(0),
+			volumeFlags.Arg(1),
+			volumeFlags.Arg(2),
+		)
+		if err != nil {
+			return commandError(err, ctx)
+		}
+		if *jsonOutput {
+			if err := writeVolumeJSON(os.Stdout, volume); err != nil {
+				return commandError(err, ctx)
+			}
+		} else {
+			fmt.Println(volume.Name)
 		}
 	case "logs":
 		logFlags := flag.NewFlagSet("dcomp logs", flag.ContinueOnError)

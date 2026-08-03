@@ -137,7 +137,11 @@ component container, removes the transient base and link networks after they
 are empty, clears desired state, and clears the operation.
 
 Declared persistent volumes survive `down`. A later `up` verifies and reuses
-them.
+them. `dcomp volume [--json] SYSTEM COMPONENT LOGICAL` may inspect and return
+the deterministic Docker name while the system is running or after `down`. It
+acquires the system's shared lifecycle lock, verifies the state root's Docker
+engine binding, and checks the existing volume's local driver and complete
+ownership labels. It never creates or adopts a volume.
 
 ## Resume and abort
 
