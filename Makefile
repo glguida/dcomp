@@ -73,6 +73,11 @@ install:
 	$(INSTALL) -m 0644 docs/component-contract.md "$(DESTDIR)$(DOCDIR)/docs/component-contract.md"
 	$(INSTALL) -m 0644 docs/lifecycle.md "$(DESTDIR)$(DOCDIR)/docs/lifecycle.md"
 	$(INSTALL) -m 0644 docs/prior-art.md "$(DESTDIR)$(DOCDIR)/docs/prior-art.md"
+	[ -d "$(DESTDIR)$(DOCDIR)/docs/assets" ] || $(INSTALL) -d -m 0755 "$(DESTDIR)$(DOCDIR)/docs/assets"
+	$(INSTALL) -m 0644 docs/assets/banner.svg "$(DESTDIR)$(DOCDIR)/docs/assets/banner.svg"
+	$(INSTALL) -m 0644 docs/assets/legame.svg "$(DESTDIR)$(DOCDIR)/docs/assets/legame.svg"
+	$(INSTALL) -m 0644 docs/assets/pettine.svg "$(DESTDIR)$(DOCDIR)/docs/assets/pettine.svg"
+	$(INSTALL) -m 0644 docs/assets/simbolo.svg "$(DESTDIR)$(DOCDIR)/docs/assets/simbolo.svg"
 
 uninstall:
 	rm -f "$(DESTDIR)$(BINDIR)/dcomp"
@@ -83,6 +88,11 @@ uninstall:
 	rm -f "$(DESTDIR)$(DOCDIR)/docs/component-contract.md"
 	rm -f "$(DESTDIR)$(DOCDIR)/docs/lifecycle.md"
 	rm -f "$(DESTDIR)$(DOCDIR)/docs/prior-art.md"
+	rm -f "$(DESTDIR)$(DOCDIR)/docs/assets/banner.svg"
+	rm -f "$(DESTDIR)$(DOCDIR)/docs/assets/legame.svg"
+	rm -f "$(DESTDIR)$(DOCDIR)/docs/assets/pettine.svg"
+	rm -f "$(DESTDIR)$(DOCDIR)/docs/assets/simbolo.svg"
+	rmdir "$(DESTDIR)$(DOCDIR)/docs/assets" 2>/dev/null || true
 	rmdir "$(DESTDIR)$(DOCDIR)/docs" 2>/dev/null || true
 	rmdir "$(DESTDIR)$(DOCDIR)" 2>/dev/null || true
 
