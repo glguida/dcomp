@@ -1,4 +1,4 @@
-# dcomp
+<img src="docs/assets/banner.svg" alt="dcomp — Components, wired by hand. A Docker component substrate. V0.1.0, MIT, Linux, Docker Engine 25+." width="100%">
 
 `dcomp` is a small substrate for building systems from independently built
 Docker components. A project owns its interface definitions, component source,
@@ -10,7 +10,7 @@ There is no DComp daemon, service registry, proxy, or sidecar. Once started,
 containers call one another directly. DComp is not in the application data
 path.
 
-## A DComp project
+## 01 · A DComp project
 
 A typical project is an ordinary repository:
 
@@ -57,6 +57,8 @@ component filter components/filter
 link filter.documents source.documents
 ```
 
+<img src="docs/assets/legame.svg" alt="The link drawn as the style guide writes it: the open square is the filter input, the filled square is the source output, and one private channel carrying document.v1.Documents runs between them." width="680">
+
 The left side of a link must be an input, the right side must be an output, and
 their declared interface identifiers must match exactly. This is nominal
 matching: DComp does not load schemas or prove wire compatibility. Output
@@ -91,7 +93,7 @@ system digest covers direct links, normalized runtime policy, and immutable
 image IDs. Descriptor paths and mutable image tags are not runtime identity;
 canonical bind source paths are.
 
-## Component contract
+## 02 · Component contract
 
 A component is an ordinary OCI image whose entrypoint:
 
@@ -128,7 +130,7 @@ convention: gRPC multiplexing, standard gRPC health, reflection, link lookup,
 and bounded shutdown. These are helper-package features, not substrate
 requirements. Components may use any language and need not use that package.
 
-## Install and run
+## 03 · Install and run
 
 Runtime requirements:
 
@@ -233,7 +235,7 @@ unknown names fail before Docker logs are opened. `-f` continues with live outpu
 application payloads; components choose what application activity they write
 to their logs.
 
-## Failure handling
+## 04 · Failure handling
 
 DComp records operation intent before the first Docker mutation. Docker errors
 may be ambiguous—a timeout can occur before or after an effect—so DComp never
@@ -266,7 +268,7 @@ the local Docker engine; connecting that state to another local daemon is an
 error. A system name is still host-wide: choosing another state root does not
 create a second Docker namespace for the same `system NAME`.
 
-## Trust and scope
+## 05 · Trust and scope
 
 DComp trusts the local host, its state directory, and the local Docker Unix
 socket. DComp does not inject the socket or host-side state into components.
@@ -291,7 +293,7 @@ traffic interception. Every component does receive the same small fixed
 container policy: `no-new-privileges`, dropped `NET_RAW`, and a 2048-process
 PIDs limit.
 
-## Development
+## 06 · Development
 
 ```sh
 make test
@@ -309,3 +311,5 @@ Further design details:
 - [Component contract](docs/component-contract.md)
 - [Lifecycle and crash consistency](docs/lifecycle.md)
 - [Prior art and scope](docs/prior-art.md)
+
+<img src="docs/assets/pettine.svg" alt="dcomp · MIT licence" width="100%">

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 168 96" role="img" aria-label="dcomp symbol: an open input square linked to a filled output square">
+  <rect width="168" height="96" fill="#EFE7D6"/>
+  <line x1="60" y1="48" x2="100" y2="48" stroke="#201A12" stroke-width="6"/>
+  <rect x="35" y="36" width="24" height="24" fill="none" stroke="#201A12" stroke-width="6"/>
+  <rect x="100" y="32" width="32" height="32" fill="#2A5CAA"/>
+</svg>
