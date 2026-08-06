@@ -25,6 +25,10 @@ usr/bin/dcomp-healthcheck
 usr/share/doc/dcomp/LICENSE
 usr/share/doc/dcomp/README.md
 usr/share/doc/dcomp/docs/architecture.md
+usr/share/doc/dcomp/docs/assets/banner.svg
+usr/share/doc/dcomp/docs/assets/legame.svg
+usr/share/doc/dcomp/docs/assets/pettine.svg
+usr/share/doc/dcomp/docs/assets/simbolo.svg
 usr/share/doc/dcomp/docs/component-contract.md
 usr/share/doc/dcomp/docs/lifecycle.md
 usr/share/doc/dcomp/docs/prior-art.md
@@ -59,7 +63,8 @@ done <"$expected"
 
 for directory in \
     "$stage/usr/share/doc/dcomp" \
-    "$stage/usr/share/doc/dcomp/docs"
+    "$stage/usr/share/doc/dcomp/docs" \
+    "$stage/usr/share/doc/dcomp/docs/assets"
 do
     [ "$(stat -c '%a' "$directory")" = 755 ] || {
         echo "install-test: directory has wrong mode: $directory" >&2
