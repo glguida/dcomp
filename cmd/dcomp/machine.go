@@ -10,7 +10,7 @@ import (
 
 const (
 	apiVersion = 1
-	version    = "0.1.0"
+	version    = "0.1.1"
 )
 
 type versionDocument struct {
@@ -36,6 +36,24 @@ type volumeDocument struct {
 	Component   string `json:"component"`
 	LogicalName string `json:"logical_name"`
 	Name        string `json:"name"`
+}
+
+type processesDocument struct {
+	APIVersion int                        `json:"api_version"`
+	Components []processComponentDocument `json:"components"`
+}
+
+type processComponentDocument struct {
+	System         string                  `json:"system"`
+	Component      string                  `json:"component"`
+	ContainerID    string                  `json:"container_id"`
+	Status         string                  `json:"status"`
+	Health         string                  `json:"health"`
+	ExitCode       int                     `json:"exit_code"`
+	Problem        string                  `json:"problem"`
+	Operation      string                  `json:"operation"`
+	Phase          string                  `json:"phase"`
+	PublishedPorts []publishedPortDocument `json:"published_ports"`
 }
 
 type networkStatusDocument struct {
@@ -104,6 +122,43 @@ func writeStatusJSON(output io.Writer, status lifecycle.Status) error {
 				Protocol: string(published.Protocol), HostIP: published.HostIP,
 				HostPort: published.HostPort, ContainerPort: published.ContainerPort,
 			})
+		}
+		document.Components = append(document.Components, item)
+	}
+	return writeDocument(output, document)
+}
+
+func writeProcessesJSON(
+	output io.Writer,
+	processes []lifecycle.ComponentProcess,
+) error {
+	document := processesDocument{
+		APIVersion: apiVersion,
+		Components: make([]processComponentDocument, 0, len(processes)),
+	}
+	for _, process := range processes {
+		item := processComponentDocument{
+			System: process.System, Component: process.Name,
+			ContainerID: process.ID, Status: process.Status,
+			Health: string(process.Health), ExitCode: process.ExitCode,
+			Problem: process.Problem, Operation: process.Operation,
+			Phase: process.Phase,
+			PublishedPorts: make(
+				[]publishedPortDocument,
+				0,
+				len(process.PublishedPorts),
+			),
+		}
+		for _, published := range process.PublishedPorts {
+			item.PublishedPorts = append(
+				item.PublishedPorts,
+				publishedPortDocument{
+					Protocol:      string(published.Protocol),
+					HostIP:        published.HostIP,
+					HostPort:      published.HostPort,
+					ContainerPort: published.ContainerPort,
+				},
+			)
 		}
 		document.Components = append(document.Components, item)
 	}

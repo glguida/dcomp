@@ -43,6 +43,65 @@ func TestStatusReportsOperationalPrivateTopologyWithoutMutation(t *testing.T) {
 	}
 }
 
+func TestProcessesListsRunningComponentsAcrossSystems(t *testing.T) {
+	controller, fake := newControllerHarness(t)
+	installImages(
+		fake,
+		"provider:v1", "consumer:v1",
+		"sha256:provider", "sha256:consumer",
+	)
+	alpha := linkedSpec("provider:v1", "consumer:v1")
+	alpha.Name = "alpha"
+	zeta := linkedSpec("provider:v1", "consumer:v1")
+	zeta.Name = "zeta"
+	if err := controller.Up(context.Background(), zeta); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.Up(context.Background(), alpha); err != nil {
+		t.Fatal(err)
+	}
+	zetaDeployment := requireDesired(t, controller.State, zeta.Name)
+	zetaConsumerID := zetaDeployment.Containers["consumer"].ID
+	fake.mu.Lock()
+	zetaConsumer := fake.containers[zetaConsumerID]
+	zetaConsumer.Status = "exited"
+	zetaConsumer.Running = false
+	zetaConsumer.Health = engine.HealthNone
+	zetaConsumer.ExitCode = 17
+	fake.containers[zetaConsumerID] = zetaConsumer
+	fake.mu.Unlock()
+	fake.resetCalls()
+
+	running, err := controller.Processes(context.Background(), "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, 0, len(running))
+	for _, process := range running {
+		got = append(got, process.System+"/"+process.Name)
+	}
+	want := []string{"alpha/consumer", "alpha/provider", "zeta/provider"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("running processes = %#v, want %#v", got, want)
+	}
+	if mutations := fake.mutationCalls(); len(mutations) != 0 {
+		t.Fatalf("Processes mutated Docker: %#v", mutations)
+	}
+
+	all, err := controller.Processes(context.Background(), "zeta", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(all), 2; got != want {
+		t.Fatalf("zeta process count = %d, want %d", got, want)
+	}
+	if all[0].Name != "consumer" ||
+		all[0].Status != "exited" ||
+		all[0].ExitCode != 17 {
+		t.Fatalf("exited process = %#v", all[0])
+	}
+}
+
 func TestStatusReportsDynamicPortWithoutChangingConfiguredVerification(t *testing.T) {
 	controller, fake := newControllerHarness(t)
 	installImages(

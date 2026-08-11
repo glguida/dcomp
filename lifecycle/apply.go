@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/glguida/dcomp/composition"
 	"github.com/glguida/dcomp/engine"
@@ -227,6 +228,13 @@ func (controller *Controller) executeApply(
 				return err
 			}
 		case phaseStart:
+			// A failed Docker start can tear down one of a container's
+			// endpoints even though attachment reconciliation already
+			// completed durably. Reconcile again so both an immediate retry
+			// and a resumed start repair Docker's partial side effects.
+			if err := controller.reconcileAttachments(ctx, operation); err != nil {
+				return err
+			}
 			if err := controller.startNewContainers(ctx, operation); err != nil {
 				return err
 			}
@@ -816,6 +824,79 @@ func networkCreateKey(key string) string {
 
 func containerCreateKey(name string) string {
 	return "container/" + name
+}
+
+// resolvePendingCreates turns ambiguous create requests back into exact,
+// operation-owned resources before a superseding target is allowed to abort
+// them. It performs no attachment or start work for the stale target.
+func (controller *Controller) resolvePendingCreates(
+	ctx context.Context,
+	operation *state.Operation,
+) error {
+	if operation.Kind != kindApply {
+		if len(operation.PendingCreates) != 0 {
+			return fmt.Errorf(
+				"%s operation has unresolved creates",
+				operation.Kind,
+			)
+		}
+		return nil
+	}
+	plans, err := resolvedTopology(operation.Target)
+	if err != nil {
+		return err
+	}
+	keys := make([]string, 0, len(operation.PendingCreates))
+	for key, pending := range operation.PendingCreates {
+		if !pending {
+			return fmt.Errorf("pending create %q is not marked pending", key)
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		switch {
+		case strings.HasPrefix(key, "network/"):
+			planKey := strings.TrimPrefix(key, "network/")
+			plan, exists := plans[planKey]
+			if !exists {
+				return fmt.Errorf("pending create names unknown network %q", planKey)
+			}
+			if err := controller.ensureNetwork(ctx, operation, plan); err != nil {
+				return err
+			}
+		case strings.HasPrefix(key, "container/"):
+			name := strings.TrimPrefix(key, "container/")
+			component, exists := operation.Target.Component(name)
+			if !exists {
+				return fmt.Errorf("pending create names unknown component %q", name)
+			}
+			for _, volume := range component.Runtime.Volumes {
+				if err := controller.ensureVolume(
+					ctx,
+					operation.Target.Name,
+					component.Name,
+					volume.Name,
+				); err != nil {
+					return err
+				}
+			}
+			if err := controller.ensureContainer(
+				ctx,
+				operation,
+				plans,
+				component,
+			); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("unknown pending create %q", key)
+		}
+	}
+	if len(operation.PendingCreates) != 0 {
+		return fmt.Errorf("unresolved creates remain after reconciliation")
+	}
+	return nil
 }
 
 func (controller *Controller) markPendingCreate(

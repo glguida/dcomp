@@ -104,8 +104,27 @@ func (controller *Controller) Up(
 	if pending, exists, err := controller.State.ReadOperation(resolved.Name); err != nil {
 		return err
 	} else if exists {
-		return pendingError(pending)
+		if pending.Kind == kindApply &&
+			pending.Phase != phaseAbort &&
+			pending.Target.Digest == resolved.Digest {
+			controller.report("resuming interrupted apply for %s", resolved.Name)
+			return controller.execute(ctx, &pending)
+		}
+		if err := controller.supersedeOperation(
+			ctx,
+			&pending,
+			resolved.Digest,
+		); err != nil {
+			return err
+		}
 	}
+	return controller.applyResolved(ctx, resolved)
+}
+
+func (controller *Controller) applyResolved(
+	ctx context.Context,
+	resolved composition.ResolvedSpec,
+) error {
 	previous, exists, err := controller.State.ReadDesired(resolved.Name)
 	if err != nil {
 		return err

@@ -546,6 +546,112 @@ func TestAliasRepairResumesAfterLostDisconnectResponse(t *testing.T) {
 	assertContainerUntouched(t, fake, workerID)
 }
 
+func TestResumeRepairsBaseNetworkRemovedByFailedStart(t *testing.T) {
+	controller, fake := newControllerHarness(t)
+	installImages(
+		fake,
+		"provider:v1", "consumer:v1",
+		"sha256:provider", "sha256:consumer",
+	)
+	spec := linkedSpec("provider:v1", "consumer:v1")
+	fake.startFailures["consumer"] = []error{errors.New("bind address already in use")}
+
+	err := controller.Up(context.Background(), spec)
+	if err == nil || !strings.Contains(err.Error(), "bind address already in use") {
+		t.Fatalf("Up error = %v, want injected start failure", err)
+	}
+	operation := requireOperation(t, controller.State, spec.Name)
+	if operation.Phase != phaseStart {
+		t.Fatalf("operation phase = %q, want %q", operation.Phase, phaseStart)
+	}
+	consumerID := operation.Containers["consumer"].ID
+	baseID := operation.Networks[componentNetworkKey("consumer")].ID
+	if err := fake.DisconnectNetwork(
+		context.Background(),
+		baseID,
+		consumerID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	fake.resetCalls()
+
+	if err := controller.Resume(context.Background(), spec.Name); err != nil {
+		t.Fatal(err)
+	}
+	repaired := requireDesired(t, controller.State, spec.Name)
+	requireNoOperation(t, controller.State, spec.Name)
+	requireSameContainer(t, repaired, "consumer", consumerID)
+	if !containsCall(
+		fake.mutationCalls(),
+		"connect-network",
+		baseID+"->"+consumerID,
+	) {
+		t.Fatalf("resume did not restore the base network: %#v", fake.mutationCalls())
+	}
+	if !fake.containers[consumerID].Running {
+		t.Fatal("consumer was not started after its network was repaired")
+	}
+}
+
+func TestUpResumesMatchingInterruptedApply(t *testing.T) {
+	controller, fake := newControllerHarness(t)
+	installImages(
+		fake,
+		"provider:v1", "consumer:v1",
+		"sha256:provider", "sha256:consumer",
+	)
+	spec := linkedSpec("provider:v1", "consumer:v1")
+	fake.startFailures["consumer"] = []error{errors.New("transient start failure")}
+
+	if err := controller.Up(context.Background(), spec); err == nil {
+		t.Fatal("initial Up unexpectedly succeeded")
+	}
+	if err := controller.Up(context.Background(), spec); err != nil {
+		t.Fatalf("matching Up did not resume: %v", err)
+	}
+	requireNoOperation(t, controller.State, spec.Name)
+	if deployment := requireDesired(t, controller.State, spec.Name); len(deployment.Containers) != 2 {
+		t.Fatalf("resumed deployment = %#v", deployment)
+	}
+}
+
+func TestUpSupersedesInterruptedApplyForDifferentTarget(t *testing.T) {
+	controller, fake := newControllerHarness(t)
+	installImages(
+		fake,
+		"provider:v1", "consumer:v1", "consumer:v2",
+		"sha256:provider", "sha256:consumer-v1", "sha256:consumer-v2",
+	)
+	initial := linkedSpec("provider:v1", "consumer:v1")
+	fake.startFailures["consumer"] = []error{errors.New("old target cannot start")}
+
+	if err := controller.Up(context.Background(), initial); err == nil {
+		t.Fatal("initial Up unexpectedly succeeded")
+	}
+	interrupted := requireOperation(t, controller.State, initial.Name)
+	oldProviderID := interrupted.Containers["provider"].ID
+	oldConsumerID := interrupted.Containers["consumer"].ID
+	fake.resetCalls()
+
+	replacement := linkedSpec("provider:v1", "consumer:v2")
+	if err := controller.Up(context.Background(), replacement); err != nil {
+		t.Fatalf("replacement Up did not supersede stale target: %v", err)
+	}
+	requireNoOperation(t, controller.State, replacement.Name)
+	deployed := requireDesired(t, controller.State, replacement.Name)
+	if got := fake.containers[deployed.Containers["consumer"].ID].ImageID; got != "sha256:consumer-v2" {
+		t.Fatalf("replacement consumer image = %q", got)
+	}
+	for _, oldID := range []string{oldProviderID, oldConsumerID} {
+		if _, exists := fake.containers[oldID]; exists {
+			t.Fatalf("superseded container %s still exists", oldID)
+		}
+		if !containsCall(fake.mutationCalls(), "remove-container", oldID) {
+			t.Fatalf("superseded container %s was not removed", oldID)
+		}
+	}
+}
+
 func TestChangedApplyPreflightsEveryOldContainerBeforeMutation(t *testing.T) {
 	controller, fake := newControllerHarness(t)
 	installImages(

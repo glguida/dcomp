@@ -3,12 +3,53 @@ package state
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/glguida/dcomp/composition"
 )
+
+func TestSystemsListsRecordedNamesWithoutCreatingState(t *testing.T) {
+	store := Store{Root: t.TempDir()}
+	if got, err := store.Systems(); err != nil {
+		t.Fatal(err)
+	} else if len(got) != 0 {
+		t.Fatalf("empty systems = %#v", got)
+	}
+	for _, name := range []string{"zeta", "alpha"} {
+		lock, err := store.Acquire(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := lock.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := store.Systems()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"alpha", "zeta"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("systems = %#v, want %#v", got, want)
+	}
+}
+
+func TestSystemsRejectsUnexpectedStateEntries(t *testing.T) {
+	store := Store{Root: t.TempDir()}
+	directory := filepath.Join(store.Root, "systems")
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "foreign"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Systems(); err == nil ||
+		!strings.Contains(err.Error(), "invalid entry") {
+		t.Fatalf("Systems error = %v", err)
+	}
+}
 
 func TestEngineBindingIsWriteOnce(t *testing.T) {
 	store := Store{Root: t.TempDir()}

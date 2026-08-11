@@ -25,6 +25,32 @@ func TestRelativeStateRootIsRejectedBeforeDockerAccess(t *testing.T) {
 	}
 }
 
+func TestPSJSONListsNoComponentsForEmptyState(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("DCOMP_STATE_ROOT", root)
+	t.Setenv("DOCKER_HOST", "unix://"+filepath.Join(root, "missing.sock"))
+
+	output, code := captureStdout(t, func() int {
+		return run([]string{"ps", "--json"})
+	})
+	if code != 0 {
+		t.Fatalf("ps exit code = %d, want 0", code)
+	}
+	const want = "{\"api_version\":1,\"components\":[]}\n"
+	if output != want {
+		t.Fatalf("ps output = %q, want %q", output, want)
+	}
+}
+
+func TestPSRejectsMoreThanOneSystemName(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("DCOMP_STATE_ROOT", root)
+	t.Setenv("DOCKER_HOST", "unix://"+filepath.Join(root, "missing.sock"))
+	if code := run([]string{"ps", "first", "second"}); code != 2 {
+		t.Fatalf("ps exit code = %d, want 2", code)
+	}
+}
+
 func TestVolumeJSONInspectsExactOwnedVolume(t *testing.T) {
 	socket := filepath.Join(t.TempDir(), "docker.sock")
 	listener, err := net.Listen("unix", socket)

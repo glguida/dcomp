@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"syscall"
 	"time"
 
@@ -76,6 +77,34 @@ type engineBinding struct {
 
 type Store struct {
 	Root string
+}
+
+// Systems returns every system name with a state directory, in stable order.
+// It observes the state root only and never creates directories or lock files.
+func (store Store) Systems() ([]string, error) {
+	if err := store.validateRoot(); err != nil {
+		return nil, err
+	}
+	directory := filepath.Join(store.Root, "systems")
+	entries, err := os.ReadDir(directory)
+	if errors.Is(err, os.ErrNotExist) {
+		return []string{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list systems: %w", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() || !composition.ValidName(entry.Name()) {
+			return nil, fmt.Errorf(
+				"invalid entry %q in systems state directory",
+				entry.Name(),
+			)
+		}
+		names = append(names, entry.Name())
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 func DefaultRoot() (string, error) {

@@ -9,6 +9,38 @@ import (
 	"github.com/glguida/dcomp/state"
 )
 
+func (controller *Controller) supersedeOperation(
+	ctx context.Context,
+	operation *state.Operation,
+	targetDigest string,
+) error {
+	if err := controller.resolvePendingCreates(ctx, operation); err != nil {
+		return fmt.Errorf(
+			"resolve interrupted %s before superseding it: %w",
+			operation.Kind,
+			err,
+		)
+	}
+	oldKind := operation.Kind
+	oldDigest := operation.Target.Digest
+	if operation.Phase != phaseAbort {
+		if err := controller.setPhase(operation, phaseAbort); err != nil {
+			return err
+		}
+	}
+	if err := controller.executeAbort(ctx, operation); err != nil {
+		return fmt.Errorf("supersede interrupted %s: %w", oldKind, err)
+	}
+	controller.report(
+		"superseded interrupted %s for %s (%s -> %s)",
+		oldKind,
+		operation.Target.Name,
+		oldDigest,
+		targetDigest,
+	)
+	return nil
+}
+
 func (controller *Controller) executeAbort(
 	ctx context.Context,
 	operation *state.Operation,

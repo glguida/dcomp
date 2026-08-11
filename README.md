@@ -1,4 +1,4 @@
-<img src="docs/assets/banner.svg" alt="dcomp — Components, wired by hand. A Docker component substrate. V0.1.0, MIT, Linux, Docker Engine 25+." width="100%">
+<img src="docs/assets/banner.svg" alt="dcomp — Components, wired by hand. A Docker component substrate. V0.1.1, MIT, Linux, Docker Engine 25+." width="100%">
 
 `dcomp` is a small substrate for building systems from independently built
 Docker components. A project owns its interface definitions, component source,
@@ -175,7 +175,7 @@ The Go packages are consumed through the module system rather than copied into
 the installation. The example source, Dockerfiles, and example protobuf remain
 in the source distribution because they are development material, not DComp
 runtime data. Installing only the `dcomp` command through Go remains possible
-with `go install github.com/glguida/dcomp/cmd/dcomp@v0.1.0` after that version
+with `go install github.com/glguida/dcomp/cmd/dcomp@v0.1.1` after that version
 has been published.
 
 Build component images using the project's ordinary Docker tooling:
@@ -193,6 +193,9 @@ Then operate the complete system through its one entry file:
 ```sh
 dcomp check system.dcomp
 dcomp up system.dcomp
+dcomp ps
+dcomp ps --all
+dcomp ps --json document-system
 dcomp status document-system
 dcomp status --json document-system
 dcomp volume --json document-system filter cache
@@ -204,11 +207,20 @@ dcomp down document-system
 ```
 
 Programs embedding the CLI must first check `dcomp version --json`. The
-`version`, `status`, and `volume` JSON documents include `api_version`.
+`version`, `ps`, `status`, and `volume` JSON documents include
+`api_version`.
 Version 1 status is one JSON object with system state, network diagnostics,
 component state, and each component's effective `published_ports`. A
 non-operational system still emits the complete status object and exits 1.
 Human-readable `status` output remains intended for terminals.
+
+`dcomp ps [NAME]` lists running component containers across every system
+recorded in the selected state root, or only the named system. `--all`
+includes created, exited, missing, and otherwise non-running components.
+`--json` emits one versioned object whose `components` array includes the
+system, component, container state, health, pending operation, problem, and
+effective published ports. Listing is observational and exits zero even when a
+listed component is unhealthy.
 
 `dcomp volume [--json] SYSTEM COMPONENT LOGICAL` returns the deterministic
 Docker name only after inspecting that existing local volume and verifying its
@@ -224,9 +236,13 @@ their link attachments, and creates or replaces only changed instances.
 Adding a new consumer therefore does not restart its unchanged provider.
 
 Running `up` again is idempotent when the resolved system is already applied.
-Every apply remains crash-resumable. `restart NAME COMPONENT...` applies
-Docker's single restart operation to only the selected committed component
-IDs; omitting component names restarts the complete system.
+If an apply was interrupted, `up` resumes it when `FILE` resolves to the
+same immutable digest. When `FILE` resolves to a different digest, `up`
+first resolves any ambiguous creates, removes only resources owned by the
+superseded operation, and then applies the new target. Every apply remains
+crash-resumable. `restart NAME COMPONENT...` applies Docker's single restart
+operation to only the selected committed component IDs; omitting component
+names restarts the complete system.
 
 `logs` reads the persisted Docker stdout and stderr streams for every verified
 component container and prefixes each record with its timestamp, component,
@@ -248,9 +264,11 @@ dcomp resume document-system
 dcomp abort document-system
 ```
 
-`resume` continues from verified Docker facts. If a create result is
-unresolved, `abort` refuses without changing Docker or operation state; run
-`resume` so DComp can recover or establish the exact deterministic object.
+`resume` continues the recorded target from verified Docker facts. A later
+`up FILE` can also continue that exact target or safely supersede it with a
+different resolved target. If a create result is unresolved, explicit
+`abort` refuses without changing Docker or operation state; run `resume` or
+`up` so DComp can recover or establish the exact deterministic object.
 After all creates are resolved, `abort` removes verified target objects
 introduced by the interrupted operation and restores the previous committed
 configuration. It does not restart a previous component already retired by the

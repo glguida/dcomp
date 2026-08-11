@@ -85,6 +85,14 @@ checks, and verifies that image-declared `VOLUME` targets have explicit mounts.
 
 If the complete resolved target is already applied with all recorded
 containers still running, `up` is a no-op.
+
+If an apply operation is already pending for the same resolved digest, `up`
+resumes it directly. If any operation is pending for a different digest,
+`up` first resolves ambiguous deterministic-name creates, switches the old
+operation to its durable abort phase, removes only verified operation-owned
+resources, and then applies the requested target. A partially completed
+`down` or `restart` is likewise superseded; the subsequent apply repairs the
+requested running state from observed Docker facts.
 Otherwise it records an apply operation and advances through durable phases:
 
 ```text
@@ -99,7 +107,7 @@ The phases:
    changed containers;
 4. connect retained and new containers to exactly their planned networks and
    disconnect obsolete attachments, then remove empty obsolete networks;
-5. start new containers; and
+5. reconcile attachments again and start new containers; and
 6. atomically commit the new deployment and clear the operation.
 
 Docker health is then an observed per-component result. An unhealthy or exited
@@ -145,8 +153,10 @@ ownership labels. It never creates or adopts a volume.
 
 ## Resume and abort
 
-While `operation.json` exists, mutating commands other than `resume` and
-`abort` refuse to run.
+`up FILE` is the declarative recovery command while `operation.json`
+exists: it resumes the same resolved apply or safely supersedes it before
+applying a different target. Other mutating commands require the operation to
+be resolved through `up`, `resume`, or `abort`.
 
 `resume NAME` repeats the recorded phase from current Docker inspection:
 
@@ -175,19 +185,23 @@ mutation.
 
 Before sending a container or network create request, DComp durably records a
 pending-create marker. The marker is cleared only in the same state update that
-records the verified object. `resume` is the only command that resolves such a
-marker: it inspects a response-lost object or issues the same deterministic-name
-create, then records the verified result. `abort` refuses while any marker
-remains, so cleanup never doubles as an unresolved forward mutation.
+records the verified object. `resume`, or a later `up`, resolves such a
+marker by inspecting a response-lost object or issuing the same
+deterministic-name create, then recording the verified result. Explicit
+`abort` refuses while any marker remains, so cleanup never doubles as an
+unresolved forward mutation.
 
 Network connect and disconnect are recovered by inspecting the exact recorded
 network name and, once Docker exposes it, its immutable ID. A same-named
 foreign or differently owned object stops recovery and is never modified.
 
 A daemon-confirmed start rejection, such as a host bind conflict, also leaves
-the apply explicit. Correct the external condition and run `resume`, or run
-`abort`. This differs from a process that starts and then exits: that component
-is committed as a stable failed state so its status and logs remain available.
+the apply explicit. Docker may remove a configured endpoint while rejecting
+start, so the start phase reconciles every planned attachment again before each
+retry. Correct the external condition and run `resume` or the same `up`;
+provide a changed `up` target to supersede the rejected operation. This
+differs from a process that starts and then exits: that component is committed
+as a stable failed state so its status and logs remain available.
 
 ## Failed components and observation
 
@@ -196,8 +210,10 @@ A component that exits or becomes unhealthy remains available to `status` and
 retained components remain separately identifiable even when another component
 fails during an incremental apply.
 
-`status` and `logs` are observational. They verify recorded component and
-network identity but never repair, start, stop, connect, or remove resources.
+`ps`, `status`, and `logs` are observational. They verify recorded
+component and network identity but never repair, start, stop, connect, or
+remove resources. `ps` lists running components across recorded systems by
+default; `--all` includes non-running records.
 Each unterminated Docker log record is bounded to one MiB before it is emitted,
 so a component cannot grow host-side line assembly without limit.
 

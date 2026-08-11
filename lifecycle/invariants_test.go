@@ -267,6 +267,39 @@ func TestAbortRefusesPendingNetworkCreateWithoutChangingOperation(t *testing.T) 
 	requireDesired(t, controller.State, spec.Name)
 }
 
+func TestDifferentUpResolvesPendingCreateThenSupersedes(t *testing.T) {
+	base := newFakeEngine()
+	fake := &failFirstNetworkCreate{
+		fakeEngine: base,
+		name:       "dcomp.demo.component.consumer",
+	}
+	controller := controllerForEngine(t, fake)
+	installImages(
+		base,
+		"provider:v1", "consumer:v1", "consumer:v2",
+		"sha256:provider", "sha256:consumer-v1", "sha256:consumer-v2",
+	)
+	initial := linkedSpec("provider:v1", "consumer:v1")
+	if err := controller.Up(context.Background(), initial); err == nil {
+		t.Fatal("initial Up unexpectedly succeeded")
+	}
+	operation := requireOperation(t, controller.State, initial.Name)
+	if !operation.PendingCreates["network/component/consumer"] {
+		t.Fatalf("pending network create was not durable: %#v", operation.PendingCreates)
+	}
+
+	replacement := linkedSpec("provider:v1", "consumer:v2")
+	if err := controller.Up(context.Background(), replacement); err != nil {
+		t.Fatalf("replacement Up did not resolve and supersede: %v", err)
+	}
+	requireNoOperation(t, controller.State, replacement.Name)
+	deployed := requireDesired(t, controller.State, replacement.Name)
+	consumer := base.containers[deployed.Containers["consumer"].ID]
+	if consumer.ImageID != "sha256:consumer-v2" {
+		t.Fatalf("replacement consumer image = %q", consumer.ImageID)
+	}
+}
+
 func TestAbortRefusesPendingContainerCreateWithoutChangingOperation(t *testing.T) {
 	base := newFakeEngine()
 	fake := &failFirstContainerCreate{

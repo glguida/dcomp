@@ -13,7 +13,7 @@ func TestWriteVersionJSONIsStableAndSelfDescribing(t *testing.T) {
 	if err := writeVersion(&output, true); err != nil {
 		t.Fatal(err)
 	}
-	const want = "{\"version\":\"0.1.0\",\"api_version\":1}\n"
+	const want = "{\"version\":\"0.1.1\",\"api_version\":1}\n"
 	if got := output.String(); got != want {
 		t.Fatalf("version JSON = %q, want %q", got, want)
 	}
@@ -50,6 +50,36 @@ func TestWriteStatusJSONReportsEffectivePublishedPorts(t *testing.T) {
 		"\"container_port\":8080}]}]}\n"
 	if got := output.String(); got != want {
 		t.Fatalf("status JSON:\n got: %s\nwant: %s", got, want)
+	}
+}
+
+func TestWriteProcessesJSONIsStableAndSelfDescribing(t *testing.T) {
+	processes := []lifecycle.ComponentProcess{{
+		System: "demo", Operation: "apply", Phase: "start",
+		ComponentStatus: lifecycle.ComponentStatus{
+			Name: "service", ID: "container-id", Status: "running",
+			Health: engine.HealthUnhealthy, Problem: "not ready",
+			PublishedPorts: []engine.PortBinding{{
+				Protocol: engine.ProtocolTCP, HostIP: "127.0.0.1",
+				HostPort: 8080, ContainerPort: 80,
+			}},
+		},
+	}}
+
+	var output bytes.Buffer
+	if err := writeProcessesJSON(&output, processes); err != nil {
+		t.Fatal(err)
+	}
+	const want = "{\"api_version\":1,\"components\":[{" +
+		"\"system\":\"demo\",\"component\":\"service\"," +
+		"\"container_id\":\"container-id\",\"status\":\"running\"," +
+		"\"health\":\"unhealthy\",\"exit_code\":0," +
+		"\"problem\":\"not ready\",\"operation\":\"apply\"," +
+		"\"phase\":\"start\",\"published_ports\":[{" +
+		"\"protocol\":\"tcp\",\"host_ip\":\"127.0.0.1\"," +
+		"\"host_port\":8080,\"container_port\":80}]}]}\n"
+	if got := output.String(); got != want {
+		t.Fatalf("processes JSON:\n got: %s\nwant: %s", got, want)
 	}
 }
 

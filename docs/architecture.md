@@ -193,6 +193,9 @@ full immutable IDs.
 
 ## Observation
 
+`dcomp ps [NAME]` lists running components across recorded systems, or one
+named system, under shared lifecycle locks. `--all` includes non-running
+component records and `--json` provides stable machine output.
 `dcomp status NAME` takes a shared lifecycle lock and inspects the recorded
 networks and component containers as one coherent generation.
 `dcomp logs NAME` reads the Docker stdout and stderr snapshots for all verified

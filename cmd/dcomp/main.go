@@ -8,12 +8,14 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/glguida/dcomp/composition"
 	"github.com/glguida/dcomp/dockerengine"
+	"github.com/glguida/dcomp/engine"
 	"github.com/glguida/dcomp/lifecycle"
 	"github.com/glguida/dcomp/state"
 )
@@ -24,6 +26,7 @@ Usage:
   dcomp version [--json]
   dcomp [--state-root DIR] check FILE
   dcomp [--state-root DIR] up FILE
+  dcomp [--state-root DIR] ps [-a|--all] [--json] [NAME]
   dcomp [--state-root DIR] status [--json] NAME
   dcomp [--state-root DIR] volume [--json] SYSTEM COMPONENT LOGICAL
   dcomp [--state-root DIR] logs [-f|--follow] NAME [COMPONENT...]
@@ -33,8 +36,9 @@ Usage:
   dcomp [--state-root DIR] abort NAME
   dcomp [--state-root DIR] inspect-image IMAGE
 
-Operations interrupted by Ctrl-C or host failure remain recorded. Use resume to
-resolve and continue the exact operation. Once no create result is unresolved,
+Operations interrupted by Ctrl-C or host failure remain recorded. Use up FILE
+to resume the same resolved target or supersede it with a different one. Resume
+continues the exact recorded operation. Once no create result is unresolved,
 abort may remove its verified in-progress resources.
 `
 
@@ -126,6 +130,34 @@ func run(arguments []string) int {
 		}
 		if err := controller.Up(ctx, spec); err != nil {
 			return commandError(err, ctx)
+		}
+	case "ps":
+		psFlags := flag.NewFlagSet("dcomp ps", flag.ContinueOnError)
+		psFlags.SetOutput(os.Stderr)
+		all := false
+		psFlags.BoolVar(&all, "a", false, "include non-running components")
+		psFlags.BoolVar(&all, "all", false, "include non-running components")
+		jsonOutput := psFlags.Bool("json", false, "emit stable machine-readable JSON")
+		if err := psFlags.Parse(commandArgs); err != nil {
+			return 2
+		}
+		if psFlags.NArg() > 1 {
+			return commandUsage("ps expects at most one NAME")
+		}
+		name := ""
+		if psFlags.NArg() == 1 {
+			name = psFlags.Arg(0)
+		}
+		processes, err := controller.Processes(ctx, name, all)
+		if err != nil {
+			return commandError(err, ctx)
+		}
+		if *jsonOutput {
+			if err := writeProcessesJSON(os.Stdout, processes); err != nil {
+				return commandError(err, ctx)
+			}
+		} else {
+			printProcesses(processes)
 		}
 	case "status":
 		statusFlags := flag.NewFlagSet("dcomp status", flag.ContinueOnError)
@@ -299,6 +331,50 @@ func printStatus(status lifecycle.Status) {
 			strings.ReplaceAll(component.Problem, "\n", " "),
 		)
 	}
+}
+
+func printProcesses(processes []lifecycle.ComponentProcess) {
+	fmt.Println("SYSTEM\tCOMPONENT\tSTATUS\tHEALTH\tEXIT\tCONTAINER\tPORTS\tOPERATION\tPROBLEM")
+	for _, process := range processes {
+		containerID := process.ID
+		if len(containerID) > 12 {
+			containerID = containerID[:12]
+		}
+		operation := ""
+		if process.Operation != "" {
+			operation = process.Operation
+			if process.Phase != "" {
+				operation += "/" + process.Phase
+			}
+		}
+		fmt.Printf(
+			"%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
+			process.System,
+			process.Name,
+			process.Status,
+			process.Health,
+			process.ExitCode,
+			containerID,
+			formatPublishedPorts(process.PublishedPorts),
+			operation,
+			strings.ReplaceAll(process.Problem, "\n", " "),
+		)
+	}
+}
+
+func formatPublishedPorts(bindings []engine.PortBinding) string {
+	values := make([]string, 0, len(bindings))
+	for _, binding := range bindings {
+		values = append(values, fmt.Sprintf(
+			"%s:%d->%d/%s",
+			binding.HostIP,
+			binding.HostPort,
+			binding.ContainerPort,
+			binding.Protocol,
+		))
+	}
+	sort.Strings(values)
+	return strings.Join(values, ",")
 }
 
 func commandUsage(message string) int {

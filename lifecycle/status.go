@@ -37,6 +37,13 @@ type Status struct {
 	Components []ComponentStatus
 }
 
+type ComponentProcess struct {
+	System    string
+	Operation string
+	Phase     string
+	ComponentStatus
+}
+
 func (status Status) Operational() bool {
 	if !status.Desired || status.Operation != "" ||
 		len(status.Networks) == 0 || len(status.Components) == 0 {
@@ -55,6 +62,48 @@ func (status Status) Operational() bool {
 		}
 	}
 	return true
+}
+
+// Processes observes components across recorded systems. By default it
+// returns only containers Docker reports as running; includeAll also returns
+// created, exited, missing, and otherwise degraded component records.
+func (controller *Controller) Processes(
+	ctx context.Context,
+	system string,
+	includeAll bool,
+) ([]ComponentProcess, error) {
+	if err := controller.validate(); err != nil {
+		return nil, err
+	}
+	var names []string
+	if system != "" {
+		names = []string{system}
+	} else {
+		var err error
+		names, err = controller.State.Systems()
+		if err != nil {
+			return nil, err
+		}
+	}
+	result := make([]ComponentProcess, 0)
+	for _, name := range names {
+		status, err := controller.Status(ctx, name)
+		if err != nil {
+			return nil, err
+		}
+		for _, component := range status.Components {
+			if !includeAll && component.Status != "running" {
+				continue
+			}
+			result = append(result, ComponentProcess{
+				System:          status.Name,
+				Operation:       status.Operation,
+				Phase:           status.Phase,
+				ComponentStatus: component,
+			})
+		}
+	}
+	return result, nil
 }
 
 // Status observes only; it never repairs, starts, stops, or deletes anything.
@@ -212,6 +261,20 @@ func (controller *Controller) observeComponent(
 	result.PublishedPorts = append(
 		[]engine.PortBinding(nil), actual.PublishedPorts...,
 	)
+	sort.Slice(result.PublishedPorts, func(i, j int) bool {
+		left := result.PublishedPorts[i]
+		right := result.PublishedPorts[j]
+		if left.HostIP != right.HostIP {
+			return left.HostIP < right.HostIP
+		}
+		if left.HostPort != right.HostPort {
+			return left.HostPort < right.HostPort
+		}
+		if left.ContainerPort != right.ContainerPort {
+			return left.ContainerPort < right.ContainerPort
+		}
+		return left.Protocol < right.Protocol
+	})
 	if err := verifyContainerCore(spec.Name, component, resource, actual); err != nil {
 		result.Problem = err.Error()
 		return result
