@@ -213,9 +213,12 @@ func (client *Client) InspectContainer(ctx context.Context, idOrName string) (en
 		Name   string `json:"Name"`
 		Image  string `json:"Image"`
 		Config struct {
-			Labels map[string]string `json:"Labels"`
-			Cmd    []string          `json:"Cmd"`
-			Env    []string          `json:"Env"`
+			Labels    map[string]string `json:"Labels"`
+			Cmd       []string          `json:"Cmd"`
+			Env       []string          `json:"Env"`
+			OpenStdin bool              `json:"OpenStdin"`
+			StdinOnce bool              `json:"StdinOnce"`
+			Tty       bool              `json:"Tty"`
 		} `json:"Config"`
 		HostConfig struct {
 			Init          *bool `json:"Init"`
@@ -306,6 +309,8 @@ func (client *Client) InspectContainer(ctx context.Context, idOrName string) (en
 		PortBindings:   portBindings,
 		PublishedPorts: publishedPorts,
 		Init:           initProcess, RestartPolicy: raw.HostConfig.RestartPolicy.Name,
+		OpenStdin: raw.Config.OpenStdin, StdinOnce: raw.Config.StdinOnce,
+		TTY: raw.Config.Tty,
 		Security: engine.ContainerSecurity{
 			NoNewPrivileges:     hasString(raw.HostConfig.SecurityOpt, "no-new-privileges"),
 			DroppedCapabilities: droppedCapabilities,
@@ -371,6 +376,9 @@ func (client *Client) CreateContainer(ctx context.Context, request engine.Contai
 		Image        string              `json:"Image"`
 		Env          []string            `json:"Env,omitempty"`
 		Cmd          *[]string           `json:"Cmd,omitempty"`
+		OpenStdin    bool                `json:"OpenStdin"`
+		StdinOnce    bool                `json:"StdinOnce"`
+		Tty          bool                `json:"Tty"`
 		ExposedPorts map[string]struct{} `json:"ExposedPorts,omitempty"`
 		Labels       map[string]string   `json:"Labels"`
 		StopTimeout  *int                `json:"StopTimeout"`
@@ -391,6 +399,7 @@ func (client *Client) CreateContainer(ctx context.Context, request engine.Contai
 		} `json:"NetworkingConfig,omitempty"`
 	}{
 		Image: request.ImageID, Env: environment,
+		OpenStdin: true, StdinOnce: false, Tty: false,
 		ExposedPorts: exposedPorts, Labels: request.Labels, StopTimeout: &stopSeconds,
 	}
 	if request.Args != nil {

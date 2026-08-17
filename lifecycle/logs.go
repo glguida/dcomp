@@ -79,6 +79,9 @@ func (controller *Controller) Logs(
 		if inspectErr != nil {
 			return fmt.Errorf("inspect %s before reading logs: %w", component.Name, inspectErr)
 		}
+		// Logs remain available while diagnosing a component created by an older
+		// DComp runtime policy. Identity, ownership, security, environment, and
+		// networks are still verified below; only attach requires current stdio.
 		if err := verifyContainerCore(spec.Name, component, resource, container); err != nil {
 			return err
 		}

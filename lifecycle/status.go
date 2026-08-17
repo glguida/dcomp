@@ -275,7 +275,7 @@ func (controller *Controller) observeComponent(
 		}
 		return left.Protocol < right.Protocol
 	})
-	if err := verifyContainerCore(spec.Name, component, resource, actual); err != nil {
+	if err := verifyCurrentContainer(spec.Name, component, resource, actual); err != nil {
 		result.Problem = err.Error()
 		return result
 	}

@@ -13,7 +13,7 @@ func TestWriteVersionJSONIsStableAndSelfDescribing(t *testing.T) {
 	if err := writeVersion(&output, true); err != nil {
 		t.Fatal(err)
 	}
-	const want = "{\"version\":\"0.1.1\",\"api_version\":1}\n"
+	const want = "{\"version\":\"0.1.2\",\"api_version\":1}\n"
 	if got := output.String(); got != want {
 		t.Fatalf("version JSON = %q, want %q", got, want)
 	}

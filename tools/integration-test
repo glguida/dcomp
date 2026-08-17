@@ -9,8 +9,13 @@ system_file="$temporary/system.dcomp"
 echo_network="dcomp.$name.component.echo"
 uppercase_network="dcomp.$name.component.uppercase"
 link_network="dcomp.$name.link.uppercase.upstream"
+attach_pid=
 
 cleanup() {
+    if [ -n "$attach_pid" ]; then
+        kill "$attach_pid" >/dev/null 2>&1 || true
+        wait "$attach_pid" >/dev/null 2>&1 || true
+    fi
     "$root/bin/dcomp" --state-root "$state_root" abort "$name" >/dev/null 2>&1 || true
     "$root/bin/dcomp" --state-root "$state_root" down "$name" >/dev/null 2>&1 || true
     rm -rf "$temporary"
@@ -64,6 +69,59 @@ reply=$(docker run --rm --network host \
     -e "DCOMP_LINK_UPSTREAM=dns:///127.0.0.1:$host_port" \
     dcomp-example-caller:dev "hello components")
 [ "$reply" = "HELLO COMPONENTS" ]
+
+attach_ready="$temporary/attach.ready"
+attach_stdout="$temporary/attach.stdout"
+attach_stderr="$temporary/attach.stderr"
+: >"$attach_ready"
+"$root/bin/dcomp" --state-root "$state_root" attach --ready-fd 3 \
+    "$name" echo </dev/null >"$attach_stdout" 2>"$attach_stderr" \
+    3>"$attach_ready" &
+attach_pid=$!
+attempt=0
+while [ ! -s "$attach_ready" ]; do
+    if ! kill -0 "$attach_pid" 2>/dev/null; then
+        wait "$attach_pid" || true
+        cat "$attach_stderr" >&2
+        echo "integration: component attachment ended before ready" >&2
+        exit 1
+    fi
+    attempt=$((attempt + 1))
+    if [ "$attempt" -ge 30 ]; then
+        echo "integration: component attachment did not become ready" >&2
+        exit 1
+    fi
+    sleep 1
+done
+reply=$(docker run --rm --network host \
+    -e "DCOMP_LINK_UPSTREAM=dns:///127.0.0.1:$host_port" \
+    dcomp-example-caller:dev "attached output")
+[ "$reply" = "ATTACHED OUTPUT" ]
+attempt=0
+while ! grep -F 'rpc=/dcomp.example.v1.Echo/Echo status=ok' \
+    "$attach_stderr" >/dev/null; do
+    if ! kill -0 "$attach_pid" 2>/dev/null; then
+        wait "$attach_pid" || true
+        cat "$attach_stderr" >&2
+        echo "integration: component attachment ended before live output" >&2
+        exit 1
+    fi
+    attempt=$((attempt + 1))
+    if [ "$attempt" -ge 30 ]; then
+        cat "$attach_stderr" >&2
+        echo "integration: attached stderr omitted live component output" >&2
+        exit 1
+    fi
+    sleep 1
+done
+[ ! -s "$attach_stdout" ] || {
+    cat "$attach_stdout" >&2
+    echo "integration: component stderr was delivered on attached stdout" >&2
+    exit 1
+}
+kill "$attach_pid"
+wait "$attach_pid" >/dev/null 2>&1 || true
+attach_pid=
 
 logs=$("$root/bin/dcomp" --state-root "$state_root" logs "$name")
 printf '%s\n' "$logs" |

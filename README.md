@@ -1,4 +1,4 @@
-<img src="docs/assets/banner.svg" alt="dcomp — Components, wired by hand. A Docker component substrate. V0.1.1, MIT, Linux, Docker Engine 25+." width="100%">
+<img src="docs/assets/banner.svg" alt="dcomp — Components, wired by hand. A Docker component substrate. V0.1.2, MIT, Linux, Docker Engine 25+." width="100%">
 
 `dcomp` is a small substrate for building systems from independently built
 Docker components. A project owns its interface definitions, component source,
@@ -175,7 +175,7 @@ The Go packages are consumed through the module system rather than copied into
 the installation. The example source, Dockerfiles, and example protobuf remain
 in the source distribution because they are development material, not DComp
 runtime data. Installing only the `dcomp` command through Go remains possible
-with `go install github.com/glguida/dcomp/cmd/dcomp@v0.1.1` after that version
+with `go install github.com/glguida/dcomp/cmd/dcomp@v0.1.2` after that version
 has been published.
 
 Build component images using the project's ordinary Docker tooling:
@@ -202,6 +202,7 @@ dcomp volume --json document-system filter cache
 dcomp logs document-system
 dcomp logs -f document-system filter
 dcomp logs -f document-system
+dcomp attach document-system filter
 dcomp restart document-system filter
 dcomp down document-system
 ```
@@ -250,6 +251,21 @@ and stream. Exact component names after the system name restrict the stream;
 unknown names fail before Docker logs are opened. `-f` continues with live output. DComp does not intercept
 application payloads; components choose what application activity they write
 to their logs.
+
+`attach SYSTEM COMPONENT` connects the command's stdin, stdout, and stderr to
+the verified running component's global file descriptors 0, 1, and 2. DComp
+keeps component stdin open and uses non-TTY Docker streams, so stdout and
+stderr remain distinct. One writable attachment is admitted per component;
+the attachment holds that recorded container generation stable until it
+disconnects. `--ready-fd FD` is a controller integration option: DComp writes
+one byte to the inherited descriptor only after Docker has established the
+attachment. End-of-file on the caller's stdin stops input forwarding but does
+not discard stdout or stderr; interrupt or terminate `dcomp attach` to detach.
+
+The first `dcomp up` under 0.1.2 replaces component containers created by an
+older DComp release so they receive this standard-I/O policy. Persistent named
+volumes survive that replacement. Status reports the policy mismatch until the
+system is applied; logs remain available for diagnosis before the upgrade.
 
 ## 04 · Failure handling
 

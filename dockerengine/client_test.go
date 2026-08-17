@@ -460,9 +460,12 @@ func TestCreateContainerUsesExactLaunchResourcesAndFixedPolicy(t *testing.T) {
 				"Name":  "/worker",
 				"Image": "sha256:image-id",
 				"Config": map[string]interface{}{
-					"Labels": map[string]string{"io.dcomp.owner": "test"},
-					"Cmd":    []string{"serve", "--listen=:50051"},
-					"Env":    []string{"A_FIRST=a", "Z_LAST=z"},
+					"Labels":    map[string]string{"io.dcomp.owner": "test"},
+					"Cmd":       []string{"serve", "--listen=:50051"},
+					"Env":       []string{"A_FIRST=a", "Z_LAST=z"},
+					"OpenStdin": true,
+					"StdinOnce": false,
+					"Tty":       false,
 				},
 				"HostConfig": map[string]interface{}{
 					"NetworkMode": "network-id",
@@ -559,9 +562,12 @@ func TestCreateContainerUsesExactLaunchResourcesAndFixedPolicy(t *testing.T) {
 	}
 
 	wantBody := map[string]interface{}{
-		"Image": "sha256:image-id",
-		"Env":   []interface{}{"A_FIRST=a", "Z_LAST=z"},
-		"Cmd":   []interface{}{"serve", "--listen=:50051"},
+		"Image":     "sha256:image-id",
+		"Env":       []interface{}{"A_FIRST=a", "Z_LAST=z"},
+		"Cmd":       []interface{}{"serve", "--listen=:50051"},
+		"OpenStdin": true,
+		"StdinOnce": false,
+		"Tty":       false,
 		"ExposedPorts": map[string]interface{}{
 			"50051/tcp": map[string]interface{}{},
 			"5353/udp":  map[string]interface{}{},
@@ -626,6 +632,14 @@ func TestCreateContainerUsesExactLaunchResourcesAndFixedPolicy(t *testing.T) {
 		t.Fatalf(
 			"inspected create policy = init:%t restart:%q, want true/no",
 			container.Init, container.RestartPolicy,
+		)
+	}
+	if !container.OpenStdin || container.StdinOnce || container.TTY {
+		t.Fatalf(
+			"inspected standard I/O policy = open:%t once:%t tty:%t",
+			container.OpenStdin,
+			container.StdinOnce,
+			container.TTY,
 		)
 	}
 	wantSecurity := engine.ContainerSecurity{

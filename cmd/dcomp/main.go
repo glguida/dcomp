@@ -30,6 +30,7 @@ Usage:
   dcomp [--state-root DIR] status [--json] NAME
   dcomp [--state-root DIR] volume [--json] SYSTEM COMPONENT LOGICAL
   dcomp [--state-root DIR] logs [-f|--follow] NAME [COMPONENT...]
+  dcomp [--state-root DIR] attach [--ready-fd FD] SYSTEM COMPONENT
   dcomp [--state-root DIR] restart NAME [COMPONENT...]
   dcomp [--state-root DIR] down NAME
   dcomp [--state-root DIR] resume NAME
@@ -232,6 +233,50 @@ func run(arguments []string) int {
 			return writeErr
 		}, logFlags.Args()[1:]...)
 		if err != nil {
+			return commandError(err, ctx)
+		}
+	case "attach":
+		attachFlags := flag.NewFlagSet("dcomp attach", flag.ContinueOnError)
+		attachFlags.SetOutput(os.Stderr)
+		readyFD := attachFlags.Int(
+			"ready-fd",
+			-1,
+			"write one readiness byte to inherited FD after Docker attaches",
+		)
+		if err := attachFlags.Parse(commandArgs); err != nil {
+			return 2
+		}
+		if attachFlags.NArg() != 2 {
+			return commandUsage("attach expects SYSTEM COMPONENT")
+		}
+		if *readyFD >= 0 && *readyFD < 3 {
+			return commandUsage("attach --ready-fd must be at least 3")
+		}
+		var readyFile *os.File
+		var ready func() error
+		if *readyFD >= 3 {
+			readyFile = os.NewFile(uintptr(*readyFD), "dcomp-attach-ready")
+			if readyFile == nil {
+				return commandUsage("attach --ready-fd is invalid")
+			}
+			defer readyFile.Close()
+			ready = func() error {
+				_, err := readyFile.Write([]byte{1})
+				if err != nil {
+					return err
+				}
+				return readyFile.Close()
+			}
+		}
+		if err := controller.Attach(
+			ctx,
+			attachFlags.Arg(0),
+			attachFlags.Arg(1),
+			engine.AttachOptions{
+				Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr,
+				Ready: ready,
+			},
+		); err != nil {
 			return commandError(err, ctx)
 		}
 	case "restart":

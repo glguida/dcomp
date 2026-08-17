@@ -272,6 +272,9 @@ func (fake *fakeEngine) CreateContainer(
 		PortBindings:  append([]engine.PortBinding(nil), request.PortBindings...),
 		Init:          true,
 		RestartPolicy: "no",
+		OpenStdin:     true,
+		StdinOnce:     false,
+		TTY:           false,
 		Security:      cloneContainerSecurity(request.Security),
 		Networks: map[string]engine.NetworkAttachment{
 			network.Name: {

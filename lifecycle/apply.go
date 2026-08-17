@@ -56,7 +56,10 @@ func (controller *Controller) deploymentMatches(
 		if inspectErr != nil {
 			return false, inspectErr
 		}
-		if err := verifyContainerCore(target.Name, component, resource, actual); err != nil {
+		if err := verifyCurrentContainer(target.Name, component, resource, actual); err != nil {
+			if errors.Is(err, errStandardIOPolicy) {
+				return false, nil
+			}
 			return false, err
 		}
 		if err := verifyContainerEnvironment(target, component, actual); err != nil {
@@ -170,12 +173,15 @@ func (controller *Controller) selectRetainedResources(
 		if inspectErr != nil {
 			return inspectErr
 		}
-		if err := verifyContainerCore(
+		if err := verifyCurrentContainer(
 			operation.Target.Name,
 			component,
 			resource,
 			actual,
 		); err != nil {
+			if errors.Is(err, errStandardIOPolicy) {
+				continue
+			}
 			return err
 		}
 		if err := verifyContainerEnvironment(
@@ -712,7 +718,7 @@ func (controller *Controller) ensureContainer(
 	if resource, exists := operation.Containers[component.Name]; exists {
 		actual, err := controller.inspectContainer(ctx, resource.ID)
 		if err == nil {
-			if err := verifyContainerCore(
+			if err := verifyCurrentContainer(
 				operation.Target.Name,
 				component,
 				resource,
@@ -740,7 +746,7 @@ func (controller *Controller) ensureContainer(
 			return fmt.Errorf("container name %q is occupied", name)
 		}
 		resource := state.Resource{ID: actual.ID, Name: actual.Name}
-		if err := verifyContainerCore(
+		if err := verifyCurrentContainer(
 			operation.Target.Name,
 			component,
 			resource,
@@ -797,7 +803,7 @@ func (controller *Controller) ensureContainer(
 		actual = recovered
 	}
 	resource := state.Resource{ID: actual.ID, Name: actual.Name}
-	if err := verifyContainerCore(
+	if err := verifyCurrentContainer(
 		operation.Target.Name,
 		component,
 		resource,
@@ -979,7 +985,7 @@ func (controller *Controller) reconcileAttachments(
 		if inspectErr != nil {
 			return inspectErr
 		}
-		if err := verifyContainerCore(
+		if err := verifyCurrentContainer(
 			operation.Target.Name,
 			component,
 			resource,
@@ -1213,7 +1219,7 @@ func (controller *Controller) startNewContainers(
 		if inspectErr != nil {
 			return inspectErr
 		}
-		if err := verifyContainerCore(
+		if err := verifyCurrentContainer(
 			operation.Target.Name,
 			component,
 			resource,

@@ -203,6 +203,50 @@ func (store Store) AcquireShared(ctx context.Context, name string) (*Lock, bool,
 	}
 }
 
+// AcquireAttachment serializes writable standard-I/O attachments to one
+// recorded component. The caller must already hold the system's shared lock,
+// which prevents lifecycle replacement for the attachment's lifetime.
+func (store Store) AcquireAttachment(
+	ctx context.Context,
+	system string,
+	component string,
+) (*Lock, error) {
+	if !composition.ValidName(component) {
+		return nil, fmt.Errorf("invalid component name %q", component)
+	}
+	directory, err := store.directory(system)
+	if err != nil {
+		return nil, err
+	}
+	file, err := os.OpenFile(
+		filepath.Join(directory, "attach-"+component+".lock"),
+		os.O_CREATE|os.O_RDWR,
+		0600,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("open component attachment lock: %w", err)
+	}
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		err = syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return &Lock{file: file}, nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) &&
+			!errors.Is(err, syscall.EAGAIN) {
+			file.Close()
+			return nil, fmt.Errorf("lock component attachment %s.%s: %w", system, component, err)
+		}
+		select {
+		case <-ctx.Done():
+			file.Close()
+			return nil, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
 // BindEngine binds this state root to one Docker engine ID. The first writer
 // publishes engine.json without replacement; concurrent writers can therefore
 // never silently rebind the root.

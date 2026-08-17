@@ -10,6 +10,13 @@ DComp applies only the explicit runtime policy declared by `system.dcomp` and
 supplies direct input targets. It defines no application message envelope and
 does not inspect request or response bodies.
 
+Every component runs without a TTY and with its global standard input kept
+open. `dcomp attach SYSTEM COMPONENT` can therefore connect a controller to
+the verified running component's fd 0, 1, and 2 while keeping stdout and stderr
+distinct. Standard I/O is a generic component runtime facility; its bytes have
+no DComp-defined application meaning. Caller stdin EOF stops input forwarding
+without ending output; cancellation or process termination ends the attachment.
+
 ## `component.dcomp`
 
 The format is line-oriented:
@@ -48,6 +55,11 @@ pull images, or infer a Dockerfile or build context.
 Application schemas, including any `.proto` files, remain normal project
 source. DComp stores no central interface catalogue, loads no schema
 definitions, and generates no application bindings.
+
+## Generated interface bindings
+
+Components must use the client and server interfaces generated from the
+interface definition. They must not reimplement the wire contract.
 
 ## System links
 

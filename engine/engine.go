@@ -7,6 +7,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"io"
 	"time"
 )
 
@@ -65,6 +66,9 @@ type Container struct {
 	PublishedPorts []PortBinding
 	Init           bool
 	RestartPolicy  string
+	OpenStdin      bool
+	StdinOnce      bool
+	TTY            bool
 	Security       ContainerSecurity
 }
 
@@ -179,6 +183,22 @@ type LogEngine interface {
 		LogOptions,
 		func(LogLine) error,
 	) error
+}
+
+// AttachOptions maps one caller's standard streams to the component's global
+// file descriptors. Ready is called after Docker has established the attach
+// transport and before any bytes are copied.
+type AttachOptions struct {
+	Stdin  io.Reader
+	Stdout io.Writer
+	Stderr io.Writer
+	Ready  func() error
+}
+
+// AttachEngine is separate from Engine because attaching standard I/O is a
+// scoped communication operation, not a lifecycle mutation.
+type AttachEngine interface {
+	ContainerAttach(context.Context, string, AttachOptions) error
 }
 
 // Engine is intentionally smaller than the Docker API. Implementations must

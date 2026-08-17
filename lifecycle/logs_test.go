@@ -370,6 +370,38 @@ func TestLogsCanReadFailedComponentOutput(t *testing.T) {
 	}
 }
 
+func TestLogsCanDiagnoseComponentBeforeStandardIOPolicyUpgrade(t *testing.T) {
+	controller, fake, deployment := deployLogFixture(t)
+	providerID := deployment.Containers["provider"].ID
+	fake.mu.Lock()
+	provider := fake.containers[providerID]
+	provider.OpenStdin = false
+	fake.containers[providerID] = provider
+	fake.mu.Unlock()
+	fake.logLines[providerID] = []engine.LogLine{{
+		Timestamp: time.Now(),
+		Stream:    engine.LogStderr,
+		Message:   "upgrade diagnostic",
+	}}
+
+	var records []LogRecord
+	if err := controller.Logs(
+		context.Background(),
+		deployment.Spec.Name,
+		false,
+		func(record LogRecord) error {
+			records = append(records, record)
+			return nil
+		},
+		"provider",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].Line.Message != "upgrade diagnostic" {
+		t.Fatalf("legacy component records = %#v", records)
+	}
+}
+
 func TestLogsFollowCancellationStopsEveryReader(t *testing.T) {
 	controller, fake, deployment := deployLogFixture(t)
 	started := make(chan string, len(deployment.Containers))

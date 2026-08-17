@@ -484,6 +484,12 @@ type inboundLinkIdentity struct {
 	TargetComponent string `json:"target_component"`
 }
 
+// componentRuntimePolicyVersion changes only when DComp's fixed container
+// launch contract changes. Including it in component identity makes the next
+// `up` replace containers created under an older policy without changing the
+// user-authored component or system grammar.
+const componentRuntimePolicyVersion = 2
+
 func (spec ResolvedSpec) computeComponentDigest(component ResolvedComponent) (string, error) {
 	copy := component
 	copy.ImageRef = ""
@@ -504,11 +510,13 @@ func (spec ResolvedSpec) computeComponentDigest(component ResolvedComponent) (st
 		return inbound[i].TargetComponent < inbound[j].TargetComponent
 	})
 	identity := struct {
-		Component ResolvedComponent     `json:"component"`
-		Inbound   []inboundLinkIdentity `json:"inbound,omitempty"`
+		RuntimePolicy int                   `json:"runtime_policy"`
+		Component     ResolvedComponent     `json:"component"`
+		Inbound       []inboundLinkIdentity `json:"inbound,omitempty"`
 	}{
-		Component: copy,
-		Inbound:   inbound,
+		RuntimePolicy: componentRuntimePolicyVersion,
+		Component:     copy,
+		Inbound:       inbound,
 	}
 	encoded, err := json.Marshal(identity)
 	if err != nil {

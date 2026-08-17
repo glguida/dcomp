@@ -14,6 +14,8 @@ import (
 
 const componentPIDsLimit int64 = 2048
 
+var errStandardIOPolicy = errors.New("component standard I/O policy mismatch")
+
 func componentSecurity() engine.ContainerSecurity {
 	return engine.ContainerSecurity{
 		NoNewPrivileges:     true,
@@ -200,6 +202,25 @@ func verifyContainerCore(
 	if len(component.Runtime.Args) != 0 &&
 		!reflect.DeepEqual(actual.Args, component.Runtime.Args) {
 		return fmt.Errorf("%s has unexpected command arguments", component.Name)
+	}
+	return nil
+}
+
+func verifyCurrentContainer(
+	system string,
+	component composition.ResolvedComponent,
+	resource state.Resource,
+	actual engine.Container,
+) error {
+	if err := verifyContainerCore(system, component, resource, actual); err != nil {
+		return err
+	}
+	if !actual.OpenStdin || actual.StdinOnce || actual.TTY {
+		return fmt.Errorf(
+			"%w: %s must keep stdin open with StdinOnce=false and Tty=false",
+			errStandardIOPolicy,
+			component.Name,
+		)
 	}
 	return nil
 }
