@@ -8,6 +8,7 @@ import (
 
 	"github.com/glguida/dcomp/composition"
 	"github.com/glguida/dcomp/engine"
+	"github.com/glguida/dcomp/proxy"
 	"github.com/glguida/dcomp/state"
 )
 
@@ -26,6 +27,8 @@ type logEvent struct {
 	record *LogRecord
 	err    error
 }
+
+const ProxyLogSource = "@proxy"
 
 // Logs streams Docker stdout and stderr for selected currently recorded
 // components, or every component when no names are supplied. Component names
@@ -48,25 +51,33 @@ func (controller *Controller) Logs(
 	if emit == nil {
 		return fmt.Errorf("log receiver is nil")
 	}
-	logEngine, ok := controller.Engine.(engine.LogEngine)
-	if !ok {
-		return fmt.Errorf("configured container engine does not support logs")
+	var logEngine engine.LogEngine
+	proxyOnly := len(components) == 1 && components[0] == ProxyLogSource
+	if !proxyOnly {
+		var ok bool
+		logEngine, ok = controller.Engine.(engine.LogEngine)
+		if !ok {
+			return fmt.Errorf("configured container engine does not support logs")
+		}
 	}
-
-	spec, networks, resources, committed, err := controller.logState(name)
+	spec, networks, resources, process, runtimeRoot, committed, err := controller.logState(name)
 	if err != nil {
 		return err
 	}
 	if err := controller.verifyEngineBinding(ctx); err != nil {
 		return err
 	}
-	selected, err := selectLogComponents(spec, components)
+	selected, includeProxy, err := selectLogComponents(spec, components)
 	if err != nil {
 		return fmt.Errorf("system %q: %w", name, err)
 	}
 	sources := make([]logSource, 0, len(spec.Components))
+	runtimeDir := runtimeDirectory(runtimeRoot, spec.Name)
+	if process != nil {
+		runtimeDir = process.RuntimeDir
+	}
 	for _, component := range spec.Components {
-		if len(selected) != 0 {
+		if selected != nil {
 			if _, exists := selected[component.Name]; !exists {
 				continue
 			}
@@ -82,7 +93,7 @@ func (controller *Controller) Logs(
 		// Logs remain available while diagnosing a component created by an older
 		// DComp runtime policy. Identity, ownership, security, environment, and
 		// networks are still verified below; only attach requires current stdio.
-		if err := verifyContainerCore(spec.Name, component, resource, container); err != nil {
+		if err := verifyContainerCore(spec.Name, runtimeDir, component, resource, container); err != nil {
 			return err
 		}
 		if err := verifyContainerEnvironment(spec, component, container); err != nil {
@@ -99,8 +110,13 @@ func (controller *Controller) Logs(
 		}
 		sources = append(sources, logSource{component: component, resource: resource})
 	}
-	if len(sources) == 0 {
+	if len(sources) == 0 && (!includeProxy || process == nil) {
 		return fmt.Errorf("system %q has no recorded component logs", name)
+	}
+	if len(sources) != 0 {
+		if logEngine == nil {
+			return fmt.Errorf("configured container engine does not support logs")
+		}
 	}
 
 	streamCtx, cancel := context.WithCancel(ctx)
@@ -118,6 +134,40 @@ func (controller *Controller) Logs(
 				engine.LogOptions{Follow: follow},
 				func(line engine.LogLine) error {
 					record := LogRecord{Component: source.component.Name, Line: line}
+					select {
+					case events <- logEvent{record: &record}:
+						return nil
+					case <-streamCtx.Done():
+						return streamCtx.Err()
+					}
+				},
+			)
+			if err != nil {
+				select {
+				case events <- logEvent{err: err}:
+				case <-streamCtx.Done():
+				}
+			}
+		}()
+	}
+	if includeProxy && process != nil {
+		process := *process
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			err := controller.Proxy.Logs(
+				streamCtx,
+				process,
+				follow,
+				func(line proxy.LogLine) error {
+					record := LogRecord{
+						Component: ProxyLogSource,
+						Line: engine.LogLine{
+							Timestamp: line.Timestamp,
+							Stream:    engine.LogStderr,
+							Message:   line.Message,
+						},
+					}
 					select {
 					case events <- logEvent{record: &record}:
 						return nil
@@ -165,25 +215,33 @@ func (controller *Controller) Logs(
 func selectLogComponents(
 	spec composition.ResolvedSpec,
 	requested []string,
-) (map[string]struct{}, error) {
+) (map[string]struct{}, bool, error) {
 	if len(requested) == 0 {
-		return nil, nil
+		return nil, true, nil
 	}
 	available := make(map[string]struct{}, len(spec.Components))
 	for _, component := range spec.Components {
 		available[component.Name] = struct{}{}
 	}
 	selected := make(map[string]struct{}, len(requested))
+	includeProxy := false
 	for _, name := range requested {
+		if name == ProxyLogSource {
+			if includeProxy {
+				return nil, false, fmt.Errorf("proxy logs were requested more than once")
+			}
+			includeProxy = true
+			continue
+		}
 		if _, duplicate := selected[name]; duplicate {
-			return nil, fmt.Errorf("component %q was requested more than once", name)
+			return nil, false, fmt.Errorf("component %q was requested more than once", name)
 		}
 		if _, exists := available[name]; !exists {
-			return nil, fmt.Errorf("component %q is not present in the recorded system", name)
+			return nil, false, fmt.Errorf("component %q is not present in the recorded system", name)
 		}
 		selected[name] = struct{}{}
 	}
-	return selected, nil
+	return selected, includeProxy, nil
 }
 
 func (controller *Controller) logState(
@@ -192,33 +250,40 @@ func (controller *Controller) logState(
 	composition.ResolvedSpec,
 	map[string]state.Resource,
 	map[string]state.Resource,
+	*proxy.Process,
+	string,
 	bool,
 	error,
 ) {
 	operation, operationExists, err := controller.State.ReadOperation(name)
 	if err != nil {
-		return composition.ResolvedSpec{}, nil, nil, false, err
+		return composition.ResolvedSpec{}, nil, nil, nil, "", false, err
 	}
 	if operationExists && len(operation.Containers) != 0 {
-		return operation.Target, operation.Networks, operation.Containers, false, nil
+		return operation.Target, operation.Networks, operation.Containers,
+			operation.Proxy, operation.RuntimeRoot, false, nil
 	}
 	if operationExists && operation.Previous != nil {
 		return operation.Previous.Spec,
 			operation.Previous.Networks,
 			operation.Previous.Containers,
+			operation.Previous.Proxy,
+			operation.Previous.RuntimeRoot,
 			true,
 			nil
 	}
 	desired, desiredExists, err := controller.State.ReadDesired(name)
 	if err != nil {
-		return composition.ResolvedSpec{}, nil, nil, false, err
+		return composition.ResolvedSpec{}, nil, nil, nil, "", false, err
 	}
 	if desiredExists {
-		return desired.Spec, desired.Networks, desired.Containers, true, nil
+		return desired.Spec, desired.Networks, desired.Containers,
+			desired.Proxy, desired.RuntimeRoot, true, nil
 	}
 	if operationExists {
-		return operation.Target, operation.Networks, operation.Containers, false, nil
+		return operation.Target, operation.Networks, operation.Containers,
+			operation.Proxy, operation.RuntimeRoot, false, nil
 	}
-	return composition.ResolvedSpec{}, nil, nil, false,
+	return composition.ResolvedSpec{}, nil, nil, nil, "", false,
 		fmt.Errorf("system %q is absent", name)
 }

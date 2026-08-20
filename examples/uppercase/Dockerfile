@@ -4,6 +4,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY component ./component
+COPY internal/runtimecontract ./internal/runtimecontract
 COPY gen ./gen
 COPY examples/uppercase ./examples/uppercase
 COPY cmd/dcomp-healthcheck ./cmd/dcomp-healthcheck
@@ -15,6 +16,5 @@ LABEL org.opencontainers.image.title="dcomp uppercase example"
 COPY --from=build /out/component /component
 COPY --from=build /out/dcomp-healthcheck /dcomp-healthcheck
 USER 65532:65532
-EXPOSE 50051
-HEALTHCHECK --interval=5s --timeout=3s --retries=3 CMD ["/dcomp-healthcheck"]
+HEALTHCHECK --interval=5s --timeout=3s --retries=3 CMD ["/dcomp-healthcheck", "--socket", "/run/dcomp/out/echo"]
 ENTRYPOINT ["/component"]

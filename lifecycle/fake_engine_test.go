@@ -3,12 +3,92 @@ package lifecycle
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/glguida/dcomp/engine"
+	"github.com/glguida/dcomp/proxy"
 )
+
+type fakeProxyManager struct {
+	mu        sync.Mutex
+	processes map[string]proxy.Process
+	configs   map[string]proxy.Config
+	nextPID   int
+}
+
+func newFakeProxyManager() *fakeProxyManager {
+	return &fakeProxyManager{
+		processes: make(map[string]proxy.Process),
+		configs:   make(map[string]proxy.Config),
+		nextPID:   1000,
+	}
+}
+
+func (manager *fakeProxyManager) Ensure(_ context.Context, config proxy.Config) (proxy.Process, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if process, exists := manager.processes[config.InstanceID]; exists {
+		return process, nil
+	}
+	manager.nextPID++
+	process := proxy.Process{
+		InstanceID: config.InstanceID, Digest: config.Digest, PID: manager.nextPID,
+		RuntimeDir: config.RuntimeDir,
+		Control:    proxy.ControlSocket(config.RuntimeDir),
+		Log:        filepath.Join(config.RuntimeDir, proxy.LogFileName),
+	}
+	manager.processes[process.InstanceID] = process
+	manager.configs[process.InstanceID] = config
+	return process, nil
+}
+
+func (manager *fakeProxyManager) Inspect(_ context.Context, process proxy.Process) (proxy.Status, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	actual, exists := manager.processes[process.InstanceID]
+	if !exists {
+		return proxy.Status{}, proxy.ErrNotRunning
+	}
+	if actual != process {
+		return proxy.Status{}, fmt.Errorf("proxy process identity mismatch")
+	}
+	inputs, outputs := 0, 0
+	for _, endpoint := range manager.configs[process.InstanceID].Endpoints {
+		if endpoint.Direction == proxy.DirectionInput {
+			inputs++
+		} else {
+			outputs++
+		}
+	}
+	return proxy.Status{
+		Version: proxy.ConfigVersion, InstanceID: actual.InstanceID,
+		Digest: actual.Digest, PID: actual.PID, Ready: true,
+		Inputs: inputs, Outputs: outputs,
+	}, nil
+}
+
+func (manager *fakeProxyManager) Stop(_ context.Context, process proxy.Process) error {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if _, exists := manager.processes[process.InstanceID]; !exists {
+		return proxy.ErrNotRunning
+	}
+	delete(manager.processes, process.InstanceID)
+	delete(manager.configs, process.InstanceID)
+	return nil
+}
+
+func (manager *fakeProxyManager) Logs(
+	_ context.Context,
+	_ proxy.Process,
+	_ bool,
+	_ func(proxy.LogLine) error,
+) error {
+	return nil
+}
 
 type engineCall struct {
 	Method string
@@ -253,9 +333,18 @@ func (fake *fakeEngine) CreateContainer(
 	if _, exists := fake.containerNames[request.Name]; exists {
 		return engine.Container{}, fmt.Errorf("container name %q already exists", request.Name)
 	}
-	network, exists := fake.networks[request.NetworkID]
-	if !exists {
-		return engine.Container{}, fmt.Errorf("%w: network %s", engine.ErrNotFound, request.NetworkID)
+	networks := make(map[string]engine.NetworkAttachment)
+	if request.NetworkID != "" {
+		network, exists := fake.networks[request.NetworkID]
+		if !exists {
+			return engine.Container{}, fmt.Errorf("%w: network %s", engine.ErrNotFound, request.NetworkID)
+		}
+		networks[network.Name] = engine.NetworkAttachment{
+			// Docker leaves NetworkID empty until first start while
+			// retaining the configured network name and aliases.
+			NetworkID: "",
+			Aliases:   append([]string(nil), request.NetworkAliases...),
+		}
 	}
 	fake.nextContainer++
 	id := fmt.Sprintf("container-%d", fake.nextContainer)
@@ -276,14 +365,7 @@ func (fake *fakeEngine) CreateContainer(
 		StdinOnce:     false,
 		TTY:           false,
 		Security:      cloneContainerSecurity(request.Security),
-		Networks: map[string]engine.NetworkAttachment{
-			network.Name: {
-				// Docker leaves NetworkID empty until first start while
-				// retaining the configured network name and aliases.
-				NetworkID: "",
-				Aliases:   append([]string(nil), request.NetworkAliases...),
-			},
-		},
+		Networks:      networks,
 	}
 	fake.containers[id] = container
 	fake.containerNames[request.Name] = id

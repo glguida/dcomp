@@ -1,236 +1,199 @@
-# Lifecycle
+# Lifecycle and recovery
 
-## Objective
+## State model
 
-DComp applies independently built components without turning Docker calls into
-an imaginary transaction. It records intent before mutation, verifies observed
-Docker facts, and can continue after the CLI, host, or Docker request is
-interrupted.
+DComp is invoked as a short-lived CLI. Durable state records one committed
+deployment and at most one incomplete operation per system. A non-stale kernel
+lock serializes mutation; shared locks give observers a coherent generation.
 
-An apply is incremental. A change to one component does not imply replacing its
-siblings, and adding a consumer does not restart an unchanged provider.
+The default state root is `$XDG_STATE_HOME/dcomp` or
+`$HOME/.local/state/dcomp`. `DCOMP_STATE_ROOT` and `--state-root` select another
+absolute path. The root is bound write-once to Docker's stable Engine ID.
 
-## Persistent state
+State format 3, introduced by DComp 0.2, records:
 
-The state root contains one write-once engine binding and one private
-directory per system:
+- the canonical resolved system and digest;
+- the transient runtime root;
+- exact immutable Docker egress-network and container IDs;
+- the proxy instance ID, PID, wiring digest, runtime directory, control
+  socket, and log path;
+- operation phase and completed step keys; and
+- create requests whose result may have been lost.
 
-```text
-engine.json
-systems/<name>/
-  lock
-  desired.json
-  operation.json       # present only while an operation is incomplete
-```
+Named volumes have deterministic names rather than immutable IDs. Their
+driver and complete DComp ownership label set are verified on every use.
 
-`engine.json` binds the complete state root to Docker's stable `/info` engine
-ID before the first lifecycle mutation. A different local Docker socket may
-not reuse or silently rebind that state. Observational commands reject recorded
-state when the connected engine ID differs.
+## Identity and authority
 
-`desired.json` records the last committed resolved specification together with
-the exact immutable container and network IDs.
+Human-readable names are discovery aids, not mutation authority. Before a
+Docker mutation, DComp inspects the recorded immutable ID and verifies the
+expected name, image, labels, launch security, mounts, environment, ports, and
+network attachments.
 
-`operation.json` records:
+The proxy is controlled through its Unix control socket. Requests carry the
+recorded instance ID; status must return the same ID, wiring digest, and PID.
+DComp does not send a fallback signal to a PID unless that live identity was
+just verified. This prevents a stale state record from signalling an unrelated
+process after PID reuse.
 
-- a random operation ID and operation kind;
-- the complete immutable target;
-- the previous committed deployment, when one exists;
-- the current durable phase;
-- exact container and network IDs acquired so far;
-- create requests that may have reached Docker but do not yet have a recorded
-  result;
-- the selected components for a targeted restart; and
-- completed per-resource steps.
+## Apply operation
 
-There is one committed deployment and at most one incomplete operation per
-system. Each mutating command holds an exclusive, non-blocking `flock`.
-`status` holds a shared lock for its complete snapshot, so it observes one
-lifecycle generation. State files are atomically replaced and the files and
-containing directories are synchronized before Docker mutation proceeds.
-
-Persistent named volumes are different from deployment resources. Docker does
-not expose immutable IDs for them, so DComp uses deterministic names and
-verifies ownership labels and the local driver before mounting. Their contents
-are never part of a digest, and DComp never deletes them implicitly.
-
-## Identity and retention
-
-Names are discovery keys and Docker DNS aliases, not destructive-mutation
-authority. Container and network mutations use full immutable IDs after
-verifying names, ownership labels, expected digests, and the fixed container
-policy (`init`, restart `no`, `no-new-privileges`, dropped `NET_RAW`, and a
-2048-process PIDs limit).
-
-The resolved system has both a complete-system digest and one digest per
-component. A component digest covers:
-
-- its immutable image ID;
-- its declared protobuf interfaces;
-- its normalized binds, volumes, arguments, published ports, and egress policy;
-  and
-- the target component of each inbound link.
-
-Outgoing links do not affect a provider's component digest. On `up`, an
-existing running container with the expected component digest and immutable
-runtime configuration is retained. Network attachments are reconciled
-separately, so a retained provider can join a new consumer's link network while
-remaining running.
-
-## `up`
-
-`up FILE` first parses and validates all descriptors and runtime directives,
-resolves image references to immutable local image IDs, requires Docker health
-checks, and verifies that image-declared `VOLUME` targets have explicit mounts.
-
-If the complete resolved target is already applied with all recorded
-containers still running, `up` is a no-op.
-
-If an apply operation is already pending for the same resolved digest, `up`
-resumes it directly. If any operation is pending for a different digest,
-`up` first resolves ambiguous deterministic-name creates, switches the old
-operation to its durable abort phase, removes only verified operation-owned
-resources, and then applies the requested target. A partially completed
-`down` or `restart` is likewise superseded; the subsequent apply repairs the
-requested running state from observed Docker facts.
-Otherwise it records an apply operation and advances through durable phases:
+The 0.2 apply phase sequence is:
 
 ```text
-retire -> networks -> create -> attach -> start -> commit
+retire -> networks -> proxy -> create -> attach -> start -> commit
 ```
 
-The phases:
+### Retire
 
-1. stop and remove only removed or changed component containers;
-2. create or recover the required private component and link networks;
-3. verify or create declared persistent volumes, then create only new or
-   changed containers;
-4. connect retained and new containers to exactly their planned networks and
-   disconnect obsolete attachments, then remove empty obsolete networks;
-5. reconcile attachments again and start new containers; and
-6. atomically commit the new deployment and clear the operation.
+DComp preflights the complete previous deployment and all target names before
+the first destructive call. Components whose immutable component digest and
+socket mounts remain valid may be retained.
 
-Docker health is then an observed per-component result. An unhealthy or exited
-component remains committed and visible rather than holding an unrelated
-system-wide transaction open.
+The target proxy digest covers runtime directory, endpoints, and links. If it
+matches the running recorded proxy, that process can be retained. If wiring
+changes or the proxy is absent, no component container is retained: a Docker
+bind mount points to a particular socket inode and cannot follow a pathname to
+a newly created listener. DComp retires those containers, then stops the old
+proxy.
 
-Every component has a one-member base bridge. It is internal unless that
-component declares `egress`. Every direct link has a separate internal bridge
-whose only members are its provider and consumer. Link changes therefore do
-not expose unrelated components to one another.
+### Networks
 
-Cycles remain valid. Links describe communication capabilities, not a global
-provider-before-consumer lifecycle order.
+DComp creates or recovers one dedicated bridge for each component that
+declares `egress`. Components without that declaration have no network
+resource and run with Docker network mode `none`. There are no link networks
+in 0.2. Each egress bridge contains only its component and is non-internal.
 
-## `restart`
+Network create intent is durable before the Docker request. If the response is
+lost, resume inspects the deterministic name, requires the current operation
+label, and records the returned immutable ID.
 
-`restart NAME COMPONENT...` records a targeted restart of the selected
-committed container IDs. It applies Docker's single restart operation to those
-exact immutable IDs and leaves unselected components running. Their resulting
-health is reported by `status`.
+### Proxy
 
-With no component names, restart selects every component. Restart does not
-resolve mutable image tags, recreate containers, change mounts or ports, or
-reconcile a new system file; use `up FILE` for configuration changes.
+DComp derives strict JSON wiring and durably marks the proxy create pending.
+The process creates all endpoint and control listeners, writes its PID and
+readiness files, and reports readiness through an inherited descriptor.
 
-If Docker applies a restart but its response is lost, `resume` repeats that
-same restart operation. This can restart a selected component more than once,
-but every retry has the same final condition: the exact container is running.
-DComp never guesses between separate stop and start operations.
+If the parent command loses the start result, resume uses the existing config,
+PID file, and identity-checked control status to recover the exact process. A
+different live proxy in the same runtime directory is never replaced.
 
-## `down`
+If that proxy later disappears before commit, resume first removes the target
+containers so no bind mount can retain one of its old socket inodes, returns
+the operation to this phase, and recreates the proxy and containers.
+Superseding the interrupted target performs the same cleanup before abort.
 
-`down NAME` records removal, gracefully stops and removes every exact verified
-component container, removes the transient base and link networks after they
-are empty, clears desired state, and clears the operation.
+### Create
 
-Declared persistent volumes survive `down`. A later `up` verifies and reuses
-them. `dcomp volume [--json] SYSTEM COMPONENT LOGICAL` may inspect and return
-the deterministic Docker name while the system is running or after `down`. It
-acquires the system's shared lifecycle lock, verifies the state root's Docker
-engine binding, and checks the existing volume's local driver and complete
-ownership labels. It never creates or adopts a volume.
+After proxy readiness, DComp creates component containers. Each request has:
 
-## Resume and abort
+- its immutable image ID and ownership labels;
+- either network mode `none` or one dedicated egress network;
+- only its generated endpoint socket bind mounts and declared user mounts;
+- `DCOMP_IN_*`, `DCOMP_OUT_*`, and `DCOMP_COMPONENT_NAME`;
+- normalized args and published ports; and
+- the fixed container security policy.
 
-`up FILE` is the declarative recovery command while `operation.json`
-exists: it resumes the same resolved apply or safely supersedes it before
-applying a different target. Other mutating commands require the operation to
-be resolved through `up`, `resume`, or `abort`.
+Every image-declared OCI volume target must have an explicit bind or named
+volume, preventing anonymous volume creation.
 
-`resume NAME` repeats the recorded phase from current Docker inspection:
+### Attach
 
-- a verified object that already satisfies a step is retained;
-- a definitively absent required object may be created;
-- an incomplete network attachment may be retried after inspection;
-- a deterministic name is recovered only when its operation and ownership
-  labels match; and
-- an unknown or contradictory observation preserves the operation and stops.
+The attachment phase reconciles only declared egress networks and aliases. It
+also verifies that components without egress have no attachments, and rejects
+foreign attachments before mutation. This phase remains separate so a lost
+Docker connect/disconnect result can be retried from observed facts.
 
-`abort NAME` is cleanup-to-a-safe-absent-target, not rollback. For an
-interrupted incremental apply it removes verified target objects that were not
-part of the previous committed deployment. It does not restart a previous
-component that the apply had already retired; a later `up` reconciles the
-desired system. Once cleanup succeeds, abort restores the previous committed
-`desired.json`, or clears desired state when the interrupted apply had no
-previous deployment. Persistent volumes remain. Abort refuses without changing
-Docker or operation state while any create result is unresolved; run
-`resume NAME` first.
+### Start and commit
 
-## Ambiguous Docker results
+DComp verifies proxy readiness, mounts, environment, and network policy before
+starting each new container. Components are all created before the first
+start, so cycles do not impose startup ordering.
 
-A deadline or connection reset does not establish whether Docker applied an
-effect. DComp preserves the operation instead of issuing a speculative inverse
-mutation.
+An unhealthy or exited component is committed as an inspectable system state;
+health is not a transaction rollback signal. Commit writes the exact Docker
+and proxy identities to `desired.json`, then clears the operation.
 
-Before sending a container or network create request, DComp durably records a
-pending-create marker. The marker is cleared only in the same state update that
-records the verified object. `resume`, or a later `up`, resolves such a
-marker by inspecting a response-lost object or issuing the same
-deterministic-name create, then recording the verified result. Explicit
-`abort` refuses while any marker remains, so cleanup never doubles as an
-unresolved forward mutation.
+## Incremental changes
 
-Network connect and disconnect are recovered by inspecting the exact recorded
-network name and, once Docker exposes it, its immutable ID. A same-named
-foreign or differently owned object stops recovery and is never modified.
+Component digests cover immutable image ID, endpoint definition, normalized
+runtime policy, and inbound target identity. The proxy has a separate wiring
+digest.
 
-A daemon-confirmed start rejection, such as a host bind conflict, also leaves
-the apply explicit. Docker may remove a configured endpoint while rejecting
-start, so the start phase reconciles every planned attachment again before each
-retry. Correct the external condition and run `resume` or the same `up`;
-provide a changed `up` target to supersede the rejected operation. This
-differs from a process that starts and then exits: that component is committed
-as a stable failed state so its status and logs remain available.
+- An image-only change replaces that component while retaining the proxy and
+  unrelated running containers.
+- A link or endpoint change replaces the proxy and all socket-mounted
+  containers.
+- Runtime-root changes likewise replace the proxy and containers.
+- Named volumes survive every replacement.
 
-## Failed components and observation
+Dynamic rewiring without component restart is intentionally not implemented.
 
-A component that exits or becomes unhealthy remains available to `status` and
-`logs`; DComp does not delete failure evidence automatically. Unchanged
-retained components remain separately identifiable even when another component
-fails during an incremental apply.
+## Resume, supersede, and abort
 
-`ps`, `status`, and `logs` are observational. They verify recorded
-component and network identity but never repair, start, stop, connect, or
-remove resources. `ps` lists running components across recorded systems by
-default; `--all` includes non-running records.
-Each unterminated Docker log record is bounded to one MiB before it is emitted,
-so a component cannot grow host-side line assembly without limit.
+`dcomp resume NAME` continues the exact stored target and phase. Repeated
+steps converge by inspecting ownership and immutable identity before mutation.
+
+`dcomp up FILE` resumes a pending apply only when both the resolved digest and
+runtime root match. Otherwise it first resolves pending creates and safely
+aborts the stale target before applying the new one.
+
+`dcomp abort NAME` is not rollback. For an interrupted apply it removes only
+operation-owned target containers, proxy, and networks that were not part of
+the previous committed deployment, then republishes the previous state record.
+If earlier phases already retired previous resources, a later `up` repairs
+them. Abort refuses to proceed while any create result remains unresolved.
+
+Non-apply operations can be aborted by clearing their durable operation after
+the command has established that no create is pending.
+
+## Down
+
+`down` first preflights the committed deployment. It then:
+
+1. stops and removes every exact component container;
+2. sends identity-checked shutdown to the proxy and waits for exit;
+3. removes transient component egress networks;
+4. clears desired and operation state; and
+5. preserves named volumes and the state-root Engine binding.
+
+Proxy cleanup removes endpoint/control sockets, PID, readiness, config, log,
+and the system runtime directory. Unexpected non-socket entries are not
+silently deleted.
+
+## Restart
+
+`restart NAME [COMPONENT...]` records selected immutable container IDs and
+uses Docker's single-container restart operation. The proxy and unselected
+components are untouched. A lost restart response is retried as the same
+convergent Docker operation.
+
+The component must reconnect its input/output streams after restart. The proxy
+accepts new producer and consumer connections without rewiring.
+
+## Observation
+
+`status` verifies the state-root Engine binding, proxy identity/readiness,
+every recorded egress network, and every component. It reports missing or
+degraded resources but never repairs them. A healthy system with no egress
+networks is operational.
+
+`ps` builds on coherent status snapshots. `logs` reads verified Docker logs in
+parallel and the recorded proxy log as `@proxy`; `-f` follows all selected
+streams until cancellation. `attach` holds a shared system lock and a
+component-specific attachment lock, verifies the proxy and container, then
+attaches standard I/O.
 
 ## Invariants
 
-1. At most one mutating operation exists per system.
-2. A state root is bound write-once to one Docker engine ID.
-3. Intent, including every possibly in-flight create, is durable before its
-   Docker mutation.
-4. Abort refuses without mutation while any create result remains unresolved.
-5. Destructive mutations use verified immutable IDs.
-6. Foreign objects are never adopted or changed.
-7. Ambiguous results never trigger speculative cleanup.
-8. Every component has a private base network; only `egress` makes it external.
-9. Every direct link has a private internal network containing only its
-   declared provider and consumer.
-10. Unchanged component containers retain their IDs across incremental apply.
-11. Persistent volumes are never removed by apply, abort, restart, or down.
-12. Completion is committed after target resource identity and attachment have
-    been verified; component health remains independently observable.
+1. A state root controls resources on one Docker Engine only.
+2. Every mutation follows exact identity and ownership verification.
+3. A component has no Docker network unless it declares `egress`; then it has
+   exactly one dedicated, externally routed bridge.
+4. No application link creates a Docker network.
+5. The proxy is ready before a component is created or started.
+6. A container sees only its own interface socket files.
+7. Components connect to interface sockets; only the proxy binds/listens.
+8. Components stop before the proxy during `down`.
+9. Persistent named volumes are never deleted implicitly.
+10. Ambiguous create results remain durable until resolved.

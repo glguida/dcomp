@@ -18,9 +18,10 @@ Compose is the closest operational baseline. DComp differs in purpose:
   beside their source;
 - links bind named input endpoints directly to named output endpoints and
   nominally match fully qualified protobuf service names before start;
-- components share one fixed gRPC port and receive standard gRPC targets;
-- each direct link gets an isolated network, while mounts, command arguments,
-  published ports, and external egress are explicit typed instance policy;
+- one per-system proxy owns interface Unix sockets and components only connect;
+- endpoint socket mounts are isolated per component, while mounts, command
+  arguments, published ports, and external egress remain explicit typed
+  instance policy;
 - the library exposes lifecycle operations to another Go program, rather than
   requiring generated Compose configuration; and
 - interrupted operations retain a small, resumable intent record and mutate
@@ -41,9 +42,9 @@ security features, and HTTP or gRPC APIs. Dapr supports multiple hosting
 environments and normally introduces a sidecar beside each application.
 
 Dapr is appropriate when those distributed-system facilities are desired.
-DComp intentionally has no sidecars, placement service, routing data plane, or
-protocol translation. Its components call one another directly on a local
-Docker link network.
+DComp intentionally has no sidecars, placement service, distributed discovery,
+security layer, protocol translation, or multi-host routing. Its narrow
+per-system proxy only pairs declared local Unix byte streams.
 
 ## HashiCorp go-plugin
 
@@ -54,8 +55,8 @@ interface and independently implemented extensions.
 
 Its lifecycle and transport model is different: plugins are child processes
 managed by a host, with process handshakes and stdio-based launch coordination.
-DComp components are OCI images, are connected through Docker DNS on private
-per-link bridges, and communicate without a host process in the data path.
+DComp components are OCI images. They connect as clients to individually
+mounted Unix sockets owned by one independently launched per-system proxy.
 
 ## Testcontainers
 
@@ -102,18 +103,19 @@ addressed, observed, and stopped.
 
 ## Scope conclusion
 
-DComp chooses a deliberately narrow combination: project-owned protobuf
-interface declarations, direct gRPC over isolated single-host Docker link
-networks, explicit per-instance runtime policy, and a resumable host library
-with no resident router.
+DComp chooses a deliberately narrow combination: project-owned nominal
+interface declarations, opaque streams paired by one single-host proxy,
+fine-grained Unix socket mounts, explicit per-instance runtime policy, and a
+resumable host library with no global control-plane daemon.
 
 The useful existing pieces are already standardized:
 
-- Docker supplies isolation, DNS, health execution, signals, and object
+- Docker supplies isolation, health execution, signals, and object
   lifecycle;
 - gRPC supplies the application transport, health, reflection, deadlines, and
   graceful shutdown; and
 - ordinary project files supply component and system configuration.
 
 DComp remains a thin system and lifecycle layer over those facilities. It adds
-no daemon, registry, router, sidecar, or image-build system.
+one bounded per-system data-plane process, but no global daemon, registry,
+sidecar, or image-build system.

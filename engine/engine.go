@@ -50,9 +50,10 @@ type Container struct {
 	ExitCode int
 	Error    string
 	Health   Health
-	// Networks is keyed by Docker network name. Before first start Docker may
-	// leave NetworkID empty, so lifecycle verification uses the exact recorded
-	// name and then verifies a non-empty ID whenever Docker supplies one.
+	// Networks is keyed by attachable Docker network name; Docker's built-in
+	// "none" pseudo-network is omitted. Before first start Docker may leave
+	// NetworkID empty, so lifecycle verification uses the exact recorded name
+	// and then verifies a non-empty ID whenever Docker supplies one.
 	Networks    map[string]NetworkAttachment
 	Environment map[string]string
 	Mounts      []Mount

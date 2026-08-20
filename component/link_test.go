@@ -5,65 +5,59 @@ import (
 	"testing"
 )
 
-func TestLinkEnv(t *testing.T) {
+func TestEndpointEnv(t *testing.T) {
 	t.Parallel()
 
-	got, err := LinkEnv("model-provider")
+	input, err := InputEnv("model-provider")
 	if err != nil {
-		t.Fatalf("LinkEnv: %v", err)
+		t.Fatalf("InputEnv: %v", err)
 	}
-	if want := "DCOMP_LINK_MODEL_PROVIDER"; got != want {
-		t.Fatalf("LinkEnv = %q, want %q", got, want)
+	if want := "DCOMP_IN_MODEL_PROVIDER"; input != want {
+		t.Fatalf("InputEnv = %q, want %q", input, want)
+	}
+	output, err := OutputEnv("model-provider")
+	if err != nil {
+		t.Fatalf("OutputEnv: %v", err)
+	}
+	if want := "DCOMP_OUT_MODEL_PROVIDER"; output != want {
+		t.Fatalf("OutputEnv = %q, want %q", output, want)
 	}
 }
 
-func TestLinkEnvRejectsAmbiguousNames(t *testing.T) {
+func TestEndpointEnvRejectsAmbiguousNames(t *testing.T) {
 	t.Parallel()
 
 	for _, slot := range []string{"", "UPSTREAM", "two_words", "1upstream", "with.dot"} {
-		if _, err := LinkEnv(slot); err == nil {
-			t.Errorf("LinkEnv(%q) unexpectedly succeeded", slot)
+		if _, err := InputEnv(slot); err == nil {
+			t.Errorf("InputEnv(%q) unexpectedly succeeded", slot)
 		}
 	}
 }
 
-func TestLinkTarget(t *testing.T) {
-	const (
-		env    = "DCOMP_LINK_UPSTREAM"
-		target = "dns:///echo:50051"
-	)
-	old, existed := os.LookupEnv(env)
-	t.Cleanup(func() {
-		if existed {
-			_ = os.Setenv(env, old)
-		} else {
-			_ = os.Unsetenv(env)
-		}
-	})
-	if err := os.Setenv(env, target); err != nil {
-		t.Fatal(err)
-	}
+func TestEndpointTargets(t *testing.T) {
+	const target = "unix:///run/dcomp/in/upstream"
+	t.Setenv("DCOMP_IN_UPSTREAM", target)
 
-	got, err := LinkTarget("upstream")
+	got, err := InputTarget("upstream")
 	if err != nil {
-		t.Fatalf("LinkTarget: %v", err)
+		t.Fatalf("InputTarget: %v", err)
 	}
 	if got != target {
-		t.Fatalf("LinkTarget = %q, want %q", got, target)
+		t.Fatalf("InputTarget = %q, want %q", got, target)
 	}
 }
 
-func TestLinkTargetRequiresValue(t *testing.T) {
-	const env = "DCOMP_LINK_MISSING"
-	old, existed := os.LookupEnv(env)
-	t.Cleanup(func() {
-		if existed {
-			_ = os.Setenv(env, old)
-		}
-	})
-	_ = os.Unsetenv(env)
-
-	if _, err := LinkTarget("missing"); err == nil {
-		t.Fatal("LinkTarget unexpectedly succeeded")
+func TestEndpointTargetRequiresUnixValue(t *testing.T) {
+	_ = os.Unsetenv("DCOMP_OUT_MISSING")
+	if _, err := OutputTarget("missing"); err == nil {
+		t.Fatal("OutputTarget unexpectedly succeeded")
+	}
+	t.Setenv("DCOMP_OUT_MISSING", "dns:///old:50051")
+	if _, err := OutputTarget("missing"); err == nil {
+		t.Fatal("OutputTarget accepted the removed network contract")
+	}
+	t.Setenv("DCOMP_OUT_MISSING", "unix:relative.sock")
+	if _, err := OutputTarget("missing"); err == nil {
+		t.Fatal("OutputTarget accepted a relative Unix path")
 	}
 }

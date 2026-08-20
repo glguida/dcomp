@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	apiVersion = 1
-	version    = "0.1.2"
+	apiVersion = 2
+	version    = "0.2.0"
 )
 
 type versionDocument struct {
@@ -26,8 +26,20 @@ type statusDocument struct {
 	Digest      string                    `json:"digest"`
 	Operation   string                    `json:"operation"`
 	Phase       string                    `json:"phase"`
+	Proxy       proxyStatusDocument       `json:"proxy"`
 	Networks    []networkStatusDocument   `json:"networks"`
 	Components  []componentStatusDocument `json:"components"`
+}
+
+type proxyStatusDocument struct {
+	InstanceID        string `json:"instance_id"`
+	Digest            string `json:"digest"`
+	PID               int    `json:"pid"`
+	Ready             bool   `json:"ready"`
+	Inputs            int    `json:"inputs"`
+	Outputs           int    `json:"outputs"`
+	ActiveConnections int64  `json:"active_connections"`
+	Problem           string `json:"problem"`
 }
 
 type volumeDocument struct {
@@ -99,8 +111,18 @@ func writeStatusJSON(output io.Writer, status lifecycle.Status) error {
 		Digest:      status.Digest,
 		Operation:   status.Operation,
 		Phase:       status.Phase,
-		Networks:    make([]networkStatusDocument, 0, len(status.Networks)),
-		Components:  make([]componentStatusDocument, 0, len(status.Components)),
+		Proxy: proxyStatusDocument{
+			InstanceID:        status.Proxy.InstanceID,
+			Digest:            status.Proxy.Digest,
+			PID:               status.Proxy.PID,
+			Ready:             status.Proxy.Ready,
+			Inputs:            status.Proxy.Inputs,
+			Outputs:           status.Proxy.Outputs,
+			ActiveConnections: status.Proxy.ActiveConnections,
+			Problem:           status.Proxy.Problem,
+		},
+		Networks:   make([]networkStatusDocument, 0, len(status.Networks)),
+		Components: make([]componentStatusDocument, 0, len(status.Components)),
 	}
 	for _, network := range status.Networks {
 		document.Networks = append(document.Networks, networkStatusDocument{

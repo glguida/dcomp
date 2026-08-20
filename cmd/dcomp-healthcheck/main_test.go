@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -39,6 +40,18 @@ func TestCheckServingComponent(t *testing.T) {
 func TestRunRejectsInvalidTimeout(t *testing.T) {
 	if got := run([]string{"--timeout=0s"}, ioDiscard{}); got != 2 {
 		t.Fatalf("run status = %d, want 2", got)
+	}
+}
+
+func TestRunAcceptsMountedUnixSocketWithoutConnecting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "endpoint.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	if got := run([]string{"--socket", path}, ioDiscard{}); got != 0 {
+		t.Fatalf("run status = %d, want 0", got)
 	}
 }
 

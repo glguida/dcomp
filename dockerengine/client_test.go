@@ -768,7 +768,9 @@ func TestCreateContainerWithoutPrimaryNetworkUsesNone(t *testing.T) {
 				},
 				"State": map[string]interface{}{"Status": "created"},
 				"NetworkSettings": map[string]interface{}{
-					"Networks": map[string]interface{}{},
+					"Networks": map[string]interface{}{
+						"none": map[string]interface{}{"NetworkID": ""},
+					},
 				},
 			})
 		default:

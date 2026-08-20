@@ -62,9 +62,6 @@ func TestValidateAcceptsCyclesAndOutputFanout(t *testing.T) {
 	if target.Name != "one" || output.Name != "server" || output.Service != peerService {
 		t.Fatalf("unexpected link target: component=%#v output=%#v", target, output)
 	}
-	if target.Port != ComponentPort {
-		t.Fatalf("resolved component port = %d, want %d", target.Port, ComponentPort)
-	}
 }
 
 func TestValidateRequiresEveryInputExactlyOnceWithMatchingService(t *testing.T) {

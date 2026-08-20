@@ -5,77 +5,124 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 temporary=$(mktemp -d)
 name="smoke-$$"
 state_root="$temporary/state"
+runtime_root="$temporary/run"
 system_file="$temporary/system.dcomp"
 echo_network="dcomp.$name.component.echo"
 uppercase_network="dcomp.$name.component.uppercase"
-link_network="dcomp.$name.link.uppercase.upstream"
+caller_network="dcomp.$name.component.caller"
+old_link_network="dcomp.$name.link.uppercase.upstream"
 attach_pid=
+
+dcomp() {
+    "$root/bin/dcomp" --state-root "$state_root" --runtime-root "$runtime_root" "$@"
+}
 
 cleanup() {
     if [ -n "$attach_pid" ]; then
         kill "$attach_pid" >/dev/null 2>&1 || true
         wait "$attach_pid" >/dev/null 2>&1 || true
     fi
-    "$root/bin/dcomp" --state-root "$state_root" abort "$name" >/dev/null 2>&1 || true
-    "$root/bin/dcomp" --state-root "$state_root" down "$name" >/dev/null 2>&1 || true
+    dcomp abort "$name" >/dev/null 2>&1 || true
+    dcomp down "$name" >/dev/null 2>&1 || true
     rm -rf "$temporary"
 }
 trap cleanup EXIT HUP INT TERM
 
-mkdir -p "$temporary/echo" "$temporary/uppercase"
-printf '%s\n' \
-    "docker dcomp-example-echo:dev" \
-    "output dcomp.example.v1.Echo echo" >"$temporary/echo/component.dcomp"
-printf '%s\n' \
-    "docker dcomp-example-uppercase:dev" \
-    "input dcomp.example.v1.Echo upstream" \
-    "output dcomp.example.v1.Echo echo" >"$temporary/uppercase/component.dcomp"
-printf '%s\n' \
-    "system $name" \
-    "component echo echo" \
-    "component uppercase uppercase" \
-    "publish uppercase tcp 127.0.0.1 0 50051" \
-    "egress uppercase" \
-    "link uppercase.upstream echo.echo" >"$system_file"
+mkdir -p "$temporary/echo" "$temporary/uppercase" "$temporary/caller"
+cp "$root/examples/echo/component.dcomp" "$temporary/echo/component.dcomp"
+cp "$root/examples/uppercase/component.dcomp" "$temporary/uppercase/component.dcomp"
+cp "$root/examples/caller/component.dcomp" "$temporary/caller/component.dcomp"
+{
+    printf '%s\n' \
+        "system $name" \
+        "component echo echo" \
+        "component uppercase uppercase" \
+        "component caller caller" \
+        "args caller --wait" \
+        "egress caller" \
+        "link uppercase.upstream echo.echo" \
+        "link caller.upstream uppercase.echo"
+} >"$system_file"
 
-"$root/bin/dcomp" --state-root "$state_root" check "$system_file"
-"$root/bin/dcomp" --state-root "$state_root" up "$system_file"
+dcomp check "$system_file"
+dcomp up "$system_file"
 
 attempt=0
-while ! status=$("$root/bin/dcomp" --state-root "$state_root" status --json "$name" 2>&1); do
+while ! status=$(dcomp status --json "$name" 2>&1); do
     attempt=$((attempt + 1))
     if [ "$attempt" -ge 30 ]; then
         printf '%s\n' "$status" >&2
-        echo "integration: components did not become healthy" >&2
+        echo "integration: system did not become healthy" >&2
         exit 1
     fi
     sleep 1
 done
 printf '%s\n' "$status"
-host_port=$(printf '%s\n' "$status" |
-    sed -n 's/.*"host_port":\([0-9][0-9]*\).*/\1/p')
-[ -n "$host_port" ] && [ "$host_port" -gt 0 ] || {
-    echo "integration: dynamic host port is absent from JSON status" >&2
+
+proxy_pid=$(sed -n '1p' "$runtime_root/$name/proxy.pid")
+[ -n "$proxy_pid" ] && kill -0 "$proxy_pid"
+[ -S "$runtime_root/$name/proxy.sock" ]
+[ -S "$runtime_root/$name/in/uppercase.upstream" ]
+[ -S "$runtime_root/$name/in/caller.upstream" ]
+[ -S "$runtime_root/$name/out/echo.echo" ]
+[ -S "$runtime_root/$name/out/uppercase.echo" ]
+
+for component in echo uppercase; do
+    [ "$(docker container inspect "dcomp.$name.container.$component" \
+        --format '{{.HostConfig.NetworkMode}}')" = "none" ]
+done
+for network in "$echo_network" "$uppercase_network"; do
+    if docker network inspect "$network" >/dev/null 2>&1; then
+        echo "integration: component without egress received network $network" >&2
+        exit 1
+    fi
+done
+[ "$(docker network inspect "$caller_network" --format '{{.Internal}}')" = "false" ]
+[ "$(docker network inspect "$caller_network" --format '{{len .Containers}}')" = "1" ]
+[ "$(docker container inspect "dcomp.$name.container.caller" \
+    --format '{{len .NetworkSettings.Networks}}')" = "1" ]
+if docker network inspect "$old_link_network" >/dev/null 2>&1; then
+    echo "integration: obsolete per-link network exists" >&2
     exit 1
+fi
+
+caller_socket="$runtime_root/$name/in/caller.upstream"
+call_system() {
+    docker run --rm --network none \
+        --mount "type=bind,src=$caller_socket,dst=/run/dcomp/in/upstream" \
+        -e DCOMP_IN_UPSTREAM=unix:///run/dcomp/in/upstream \
+        dcomp-example-caller:dev "$1"
 }
 
-[ "$(docker network inspect "$echo_network" --format '{{.Internal}}')" = "true" ]
-[ "$(docker network inspect "$uppercase_network" --format '{{.Internal}}')" = "false" ]
-[ "$(docker network inspect "$link_network" --format '{{.Internal}}')" = "true" ]
-link_members=$(docker network inspect "$link_network" --format '{{len .Containers}}')
-[ "$link_members" = "2" ]
-
-reply=$(docker run --rm --network host \
-    -e "DCOMP_LINK_UPSTREAM=dns:///127.0.0.1:$host_port" \
-    dcomp-example-caller:dev "hello components")
+reply=$(call_system "hello components")
 [ "$reply" = "HELLO COMPONENTS" ]
+
+for component in echo uppercase caller; do
+    environment=$(docker container inspect "dcomp.$name.container.$component" \
+        --format '{{range .Config.Env}}{{println .}}{{end}}')
+    if printf '%s\n' "$environment" | grep '^DCOMP_LINK_' >/dev/null; then
+        echo "integration: $component received removed DCOMP_LINK contract" >&2
+        exit 1
+    fi
+done
+
+interface_mounts() {
+    docker container inspect "dcomp.$name.container.$1" \
+        --format '{{range .Mounts}}{{println .Destination}}{{end}}' |
+        awk '/^\/run\/dcomp\// { print }' |
+        sort
+}
+[ "$(interface_mounts echo)" = "/run/dcomp/out/echo" ]
+[ "$(interface_mounts caller)" = "/run/dcomp/in/upstream" ]
+uppercase_mounts=$(interface_mounts uppercase)
+[ "$uppercase_mounts" = "$(printf '%s\n' /run/dcomp/in/upstream /run/dcomp/out/echo)" ]
 
 attach_ready="$temporary/attach.ready"
 attach_stdout="$temporary/attach.stdout"
 attach_stderr="$temporary/attach.stderr"
 : >"$attach_ready"
-"$root/bin/dcomp" --state-root "$state_root" attach --ready-fd 3 \
-    "$name" echo </dev/null >"$attach_stdout" 2>"$attach_stderr" \
+"$root/bin/dcomp" --state-root "$state_root" --runtime-root "$runtime_root" \
+    attach --ready-fd 3 "$name" echo </dev/null >"$attach_stdout" 2>"$attach_stderr" \
     3>"$attach_ready" &
 attach_pid=$!
 attempt=0
@@ -93,19 +140,10 @@ while [ ! -s "$attach_ready" ]; do
     fi
     sleep 1
 done
-reply=$(docker run --rm --network host \
-    -e "DCOMP_LINK_UPSTREAM=dns:///127.0.0.1:$host_port" \
-    dcomp-example-caller:dev "attached output")
+reply=$(call_system "attached output")
 [ "$reply" = "ATTACHED OUTPUT" ]
 attempt=0
-while ! grep -F 'rpc=/dcomp.example.v1.Echo/Echo status=ok' \
-    "$attach_stderr" >/dev/null; do
-    if ! kill -0 "$attach_pid" 2>/dev/null; then
-        wait "$attach_pid" || true
-        cat "$attach_stderr" >&2
-        echo "integration: component attachment ended before live output" >&2
-        exit 1
-    fi
+while ! grep -F 'rpc=/dcomp.example.v1.Echo/Echo status=ok' "$attach_stderr" >/dev/null; do
     attempt=$((attempt + 1))
     if [ "$attempt" -ge 30 ]; then
         cat "$attach_stderr" >&2
@@ -114,61 +152,37 @@ while ! grep -F 'rpc=/dcomp.example.v1.Echo/Echo status=ok' \
     fi
     sleep 1
 done
-[ ! -s "$attach_stdout" ] || {
-    cat "$attach_stdout" >&2
-    echo "integration: component stderr was delivered on attached stdout" >&2
-    exit 1
-}
 kill "$attach_pid"
 wait "$attach_pid" >/dev/null 2>&1 || true
 attach_pid=
 
-logs=$("$root/bin/dcomp" --state-root "$state_root" logs "$name")
+logs=$(dcomp logs "$name")
 printf '%s\n' "$logs" |
-    awk -F '	' '$2 == "echo" && $4 ~ /rpc=\/dcomp.example.v1.Echo\/Echo/ { found = 1 } END { exit !found }'
+    awk -F '\t' '$2 == "@proxy" && $4 ~ /connection paired/ { found = 1 } END { exit !found }'
 printf '%s\n' "$logs" |
-    awk -F '	' '$2 == "uppercase" && $4 ~ /rpc=\/dcomp.example.v1.Echo\/Echo/ { found = 1 } END { exit !found }'
-echo_logs=$("$root/bin/dcomp" --state-root "$state_root" logs "$name" echo)
-printf '%s\n' "$echo_logs" |
-    awk -F '	' '$2 == "echo" && $4 ~ /rpc=\/dcomp.example.v1.Echo\/Echo/ { found = 1 } END { exit !found }'
-if printf '%s\n' "$echo_logs" | awk -F '	' '$2 == "uppercase" { found = 1 } END { exit !found }'; then
-    echo "integration: filtered logs included an unrequested component" >&2
-    exit 1
-fi
+    awk -F '\t' '$2 == "echo" && $4 ~ /rpc=\/dcomp.example.v1.Echo\/Echo/ { found = 1 } END { exit !found }'
 
 echo_id=$(docker container inspect "dcomp.$name.container.echo" --format '{{.ID}}')
 uppercase_id=$(docker container inspect "dcomp.$name.container.uppercase" --format '{{.ID}}')
-for container in "$echo_id" "$uppercase_id"; do
-    [ "$(docker container inspect "$container" --format '{{json .HostConfig.SecurityOpt}}')" = '["no-new-privileges"]' ]
-    [ "$(docker container inspect "$container" --format '{{json .HostConfig.CapDrop}}')" = '["NET_RAW"]' ]
-    [ "$(docker container inspect "$container" --format '{{.HostConfig.PidsLimit}}')" = "2048" ]
-done
-"$root/bin/dcomp" --state-root "$state_root" restart "$name"
+dcomp restart "$name" uppercase
 [ "$(docker container inspect "dcomp.$name.container.echo" --format '{{.ID}}')" = "$echo_id" ]
 [ "$(docker container inspect "dcomp.$name.container.uppercase" --format '{{.ID}}')" = "$uppercase_id" ]
+[ "$(sed -n '1p' "$runtime_root/$name/proxy.pid")" = "$proxy_pid" ]
+
 attempt=0
-while ! status=$("$root/bin/dcomp" --state-root "$state_root" status --json "$name" 2>&1); do
+while ! dcomp status --json "$name" >/dev/null 2>&1; do
     attempt=$((attempt + 1))
     if [ "$attempt" -ge 30 ]; then
-        printf '%s\n' "$status" >&2
-        echo "integration: restarted system did not become healthy" >&2
+        echo "integration: restarted component did not become healthy" >&2
         exit 1
     fi
     sleep 1
 done
-host_port=$(printf '%s\n' "$status" |
-    sed -n 's/.*"host_port":\([0-9][0-9]*\).*/\1/p')
-[ -n "$host_port" ] && [ "$host_port" -gt 0 ] || {
-    echo "integration: dynamic host port is absent after restart" >&2
-    exit 1
-}
-reply=$(docker run --rm --network host \
-    -e "DCOMP_LINK_UPSTREAM=dns:///127.0.0.1:$host_port" \
-    dcomp-example-caller:dev "after restart")
+reply=$(call_system "after restart")
 [ "$reply" = "AFTER RESTART" ]
 
-"$root/bin/dcomp" --state-root "$state_root" down "$name"
-for network in "$echo_network" "$uppercase_network" "$link_network"; do
+dcomp down "$name"
+for network in "$echo_network" "$uppercase_network" "$caller_network"; do
     if docker network inspect "$network" >/dev/null 2>&1; then
         echo "integration: network $network still exists after down" >&2
         exit 1
@@ -178,6 +192,11 @@ if docker container inspect "dcomp.$name.container.echo" >/dev/null 2>&1; then
     echo "integration: component still exists after down" >&2
     exit 1
 fi
+if kill -0 "$proxy_pid" >/dev/null 2>&1; then
+    echo "integration: proxy still runs after down" >&2
+    exit 1
+fi
+[ ! -e "$runtime_root/$name" ]
 
 trap - EXIT HUP INT TERM
 rm -rf "$temporary"

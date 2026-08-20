@@ -10,7 +10,7 @@ import (
 	"github.com/glguida/dcomp/engine"
 )
 
-func TestStatusReportsOperationalPrivateTopologyWithoutMutation(t *testing.T) {
+func TestStatusReportsOperationalNetworkNoneTopologyWithoutMutation(t *testing.T) {
 	controller, fake := newControllerHarness(t)
 	installImages(
 		fake,
@@ -30,13 +30,11 @@ func TestStatusReportsOperationalPrivateTopologyWithoutMutation(t *testing.T) {
 	if !status.Operational() {
 		t.Fatalf("healthy deployment is not operational: %#v", status)
 	}
-	if got, want := len(status.Networks), 3; got != want {
-		t.Fatalf("network status count = %d, want %d", got, want)
+	if !status.Proxy.Ready || status.Proxy.Inputs != 1 || status.Proxy.Outputs != 1 {
+		t.Fatalf("unexpected proxy status: %#v", status.Proxy)
 	}
-	for _, network := range status.Networks {
-		if network.ID == "" || network.Problem != "" {
-			t.Fatalf("unexpected network status: %#v", network)
-		}
+	if got := len(status.Networks); got != 0 {
+		t.Fatalf("network status count = %d, want none", got)
 	}
 	if mutations := fake.mutationCalls(); len(mutations) != 0 {
 		t.Fatalf("Status mutated Docker: %#v", mutations)
@@ -164,13 +162,14 @@ func TestStatusReportsOneMissingNetworkAndFailedComponent(t *testing.T) {
 		"sha256:provider", "sha256:consumer",
 	)
 	spec := linkedSpec("provider:v1", "consumer:v1")
+	spec.Components[1].Runtime.ExternalEgress = true
 	if err := controller.Up(context.Background(), spec); err != nil {
 		t.Fatal(err)
 	}
 	deployment := requireDesired(t, controller.State, spec.Name)
-	linkID := deployment.Networks["link/consumer/upstream"].ID
+	baseID := deployment.Networks["component/consumer"].ID
 	consumerID := deployment.Containers["consumer"].ID
-	fake.deleteNetworkOutOfBand(linkID)
+	fake.deleteNetworkOutOfBand(baseID)
 	fake.mu.Lock()
 	consumer := fake.containers[consumerID]
 	consumer.Status = "exited"
@@ -188,12 +187,12 @@ func TestStatusReportsOneMissingNetworkAndFailedComponent(t *testing.T) {
 	if status.Operational() {
 		t.Fatalf("broken deployment is operational: %#v", status)
 	}
-	var sawLink, sawConsumer bool
+	var sawBase, sawConsumer bool
 	for _, network := range status.Networks {
-		if network.Key == "link/consumer/upstream" {
-			sawLink = true
+		if network.Key == "component/consumer" {
+			sawBase = true
 			if !strings.Contains(network.Problem, "absent") {
-				t.Fatalf("missing link problem = %q", network.Problem)
+				t.Fatalf("missing egress network problem = %q", network.Problem)
 			}
 		} else if network.Problem != "" {
 			t.Fatalf("unrelated network %s is degraded: %q", network.Key, network.Problem)
@@ -207,7 +206,7 @@ func TestStatusReportsOneMissingNetworkAndFailedComponent(t *testing.T) {
 			}
 		}
 	}
-	if !sawLink || !sawConsumer {
+	if !sawBase || !sawConsumer {
 		t.Fatalf("incomplete status: %#v", status)
 	}
 	if mutations := fake.mutationCalls(); len(mutations) != 0 {

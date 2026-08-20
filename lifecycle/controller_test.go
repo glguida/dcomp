@@ -18,7 +18,7 @@ import (
 
 const echoService = "example.echo.v1.Echo"
 
-func TestUpCreatesPrivateTopologyAndPassesRuntimeResources(t *testing.T) {
+func TestUpUsesNoneWithoutEgressAndPassesRuntimeResources(t *testing.T) {
 	controller, fake := newControllerHarness(t)
 	source := filepath.Join(t.TempDir(), "source")
 	if err := os.Mkdir(source, 0o700); err != nil {
@@ -41,7 +41,7 @@ func TestUpCreatesPrivateTopologyAndPassesRuntimeResources(t *testing.T) {
 		Args: []string{"run", "--mode=test"},
 		Ports: []composition.PublishedPort{{
 			Protocol: "tcp", HostIP: "127.0.0.1",
-			HostPort: 15051, ContainerPort: composition.ComponentPort,
+			HostPort: 15051, ContainerPort: 8080,
 		}},
 		ExternalEgress: true,
 	}
@@ -52,40 +52,41 @@ func TestUpCreatesPrivateTopologyAndPassesRuntimeResources(t *testing.T) {
 
 	deployment := requireDesired(t, controller.State, spec.Name)
 	requireNoOperation(t, controller.State, spec.Name)
-	if got, want := len(deployment.Networks), 3; got != want {
+	if got, want := len(deployment.Networks), 1; got != want {
 		t.Fatalf("network count = %d, want %d", got, want)
 	}
 
-	providerBase := requireNetwork(t, fake, deployment.Networks["component/provider"].ID)
+	if _, exists := deployment.Networks["component/provider"]; exists {
+		t.Fatal("provider without egress was given a network")
+	}
 	consumerBase := requireNetwork(t, fake, deployment.Networks["component/consumer"].ID)
-	link := requireNetwork(t, fake, deployment.Networks["link/consumer/upstream"].ID)
-	if !providerBase.Internal {
-		t.Fatal("provider without egress was given a non-internal base network")
-	}
 	if consumerBase.Internal {
-		t.Fatal("consumer with egress was given an internal base network")
+		t.Fatal("consumer egress network is internal")
 	}
-	if !link.Internal {
-		t.Fatal("component link network is not internal")
-	}
-	requireMembers(
-		t,
-		link,
-		deployment.Containers["provider"].ID,
-		deployment.Containers["consumer"].ID,
-	)
-	requireMembers(t, providerBase, deployment.Containers["provider"].ID)
 	requireMembers(t, consumerBase, deployment.Containers["consumer"].ID)
 
 	requests := requestsByComponent(fake.containerRequests)
+	provider := requests["provider"]
+	if provider.NetworkID != "" || len(provider.NetworkAliases) != 0 {
+		t.Fatalf("provider network request = %#v, want network mode none", provider)
+	}
+	if networks := fake.containers[deployment.Containers["provider"].ID].Networks; len(networks) != 0 {
+		t.Fatalf("provider networks = %#v, want none", networks)
+	}
 	consumer := requests["consumer"]
 	if consumer.NetworkID != consumerBase.ID {
 		t.Fatalf("consumer primary network = %q, want %q", consumer.NetworkID, consumerBase.ID)
 	}
-	if got, want := consumer.Environment["DCOMP_LINK_UPSTREAM"], "dns:///provider:50051"; got != want {
+	if got, want := consumer.Environment["DCOMP_IN_UPSTREAM"], "unix:///run/dcomp/in/upstream"; got != want {
 		t.Fatalf("upstream = %q, want %q", got, want)
 	}
 	wantMounts := []engine.Mount{
+		{
+			Type:     engine.MountBind,
+			Source:   filepath.Join(deployment.Proxy.RuntimeDir, "in", "consumer.upstream"),
+			Target:   "/run/dcomp/in/upstream",
+			ReadOnly: true,
+		},
 		{
 			Type: engine.MountVolume, Source: "dcomp.demo.volume.consumer.data",
 			Target: "/var/lib/consumer",
@@ -110,7 +111,7 @@ func TestUpCreatesPrivateTopologyAndPassesRuntimeResources(t *testing.T) {
 		)
 	}
 	wantPorts := []engine.PortBinding{{
-		ContainerPort: 50051,
+		ContainerPort: 8080,
 		Protocol:      engine.ProtocolTCP,
 		HostIP:        "127.0.0.1",
 		HostPort:      15051,
@@ -157,10 +158,12 @@ func TestIncrementalApplyPreservesUnchangedContainers(t *testing.T) {
 		t.Fatal(err)
 	}
 	second := requireDesired(t, controller.State, withObserver.Name)
-	requireSameContainer(t, second, "provider", providerID)
-	requireSameContainer(t, second, "consumer", consumerID)
-	assertContainerUntouched(t, fake, providerID)
-	assertContainerUntouched(t, fake, consumerID)
+	if second.Containers["provider"].ID == providerID ||
+		second.Containers["consumer"].ID == consumerID {
+		t.Fatal("wiring change retained a container with a stale socket mount")
+	}
+	providerID = second.Containers["provider"].ID
+	consumerID = second.Containers["consumer"].ID
 	observerV1 := second.Containers["observer"].ID
 
 	changedObserver := fanoutSpec("provider:v1", "consumer:v1", "observer:v2")
@@ -182,16 +185,99 @@ func TestIncrementalApplyPreservesUnchangedContainers(t *testing.T) {
 		t.Fatal(err)
 	}
 	final := requireDesired(t, controller.State, initial.Name)
-	requireSameContainer(t, final, "provider", providerID)
-	requireSameContainer(t, final, "consumer", consumerID)
+	if final.Containers["provider"].ID == providerID ||
+		final.Containers["consumer"].ID == consumerID {
+		t.Fatal("removing wiring retained a container with a stale socket mount")
+	}
 	if _, exists := final.Containers["observer"]; exists {
 		t.Fatal("removed observer remains in desired state")
 	}
-	assertContainerUntouched(t, fake, providerID)
-	assertContainerUntouched(t, fake, consumerID)
 }
 
-func TestRetargetedInputReplacesOnlyItsConsumer(t *testing.T) {
+func TestUpRecreatesSocketMountedContainersWhenProxyIsMissing(t *testing.T) {
+	controller, fake := newControllerHarness(t)
+	installImages(
+		fake,
+		"provider:v1", "consumer:v1",
+		"sha256:provider", "sha256:consumer",
+	)
+	spec := linkedSpec("provider:v1", "consumer:v1")
+	if err := controller.Up(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	before := requireDesired(t, controller.State, spec.Name)
+	manager := controller.Proxy.(*fakeProxyManager)
+	manager.mu.Lock()
+	delete(manager.processes, before.Proxy.InstanceID)
+	delete(manager.configs, before.Proxy.InstanceID)
+	manager.mu.Unlock()
+
+	if err := controller.Up(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	after := requireDesired(t, controller.State, spec.Name)
+	if after.Proxy.InstanceID == before.Proxy.InstanceID {
+		t.Fatal("missing proxy was not replaced")
+	}
+	for _, name := range []string{"provider", "consumer"} {
+		if after.Containers[name].ID == before.Containers[name].ID {
+			t.Fatalf("%s retained a bind mount to the missing proxy socket", name)
+		}
+	}
+	for key, resource := range before.Networks {
+		if after.Networks[key].ID != resource.ID {
+			t.Fatalf("unaffected network %s was replaced", key)
+		}
+	}
+}
+
+func TestResumeRecreatesSocketMountedContainersWhenProxyDiesDuringApply(t *testing.T) {
+	controller, fake := newControllerHarness(t)
+	installImages(
+		fake,
+		"provider:v1", "consumer:v1",
+		"sha256:provider", "sha256:consumer",
+	)
+	spec := linkedSpec("provider:v1", "consumer:v1")
+	fake.startFailures["consumer"] = []error{errors.New("transient start failure")}
+
+	if err := controller.Up(context.Background(), spec); err == nil {
+		t.Fatal("initial Up unexpectedly succeeded")
+	}
+	interrupted := requireOperation(t, controller.State, spec.Name)
+	if interrupted.Phase != phaseStart {
+		t.Fatalf("operation phase = %q, want %q", interrupted.Phase, phaseStart)
+	}
+	oldProxyPID := interrupted.Proxy.PID
+	oldContainerIDs := make(map[string]string, len(interrupted.Containers))
+	for name, resource := range interrupted.Containers {
+		oldContainerIDs[name] = resource.ID
+	}
+	manager := controller.Proxy.(*fakeProxyManager)
+	manager.mu.Lock()
+	delete(manager.processes, interrupted.Proxy.InstanceID)
+	delete(manager.configs, interrupted.Proxy.InstanceID)
+	manager.mu.Unlock()
+
+	if err := controller.Resume(context.Background(), spec.Name); err != nil {
+		t.Fatal(err)
+	}
+	deployed := requireDesired(t, controller.State, spec.Name)
+	requireNoOperation(t, controller.State, spec.Name)
+	if deployed.Proxy.PID == oldProxyPID {
+		t.Fatal("dead proxy process was not replaced")
+	}
+	for name, oldID := range oldContainerIDs {
+		if deployed.Containers[name].ID == oldID {
+			t.Fatalf("%s retained a bind mount to the dead proxy socket", name)
+		}
+		if _, exists := fake.containers[oldID]; exists {
+			t.Fatalf("stale %s container %s still exists", name, oldID)
+		}
+	}
+}
+
+func TestRetargetedInputReplacesProxyAndSocketMountedComponents(t *testing.T) {
 	controller, fake := newControllerHarness(t)
 	installImages(
 		fake,
@@ -220,7 +306,7 @@ func TestRetargetedInputReplacesOnlyItsConsumer(t *testing.T) {
 	providerAID := first.Containers["provider-a"].ID
 	providerBID := first.Containers["provider-b"].ID
 	consumerID := first.Containers["consumer"].ID
-	linkID := first.Networks["link/consumer/upstream"].ID
+	proxyID := first.Proxy.InstanceID
 	fake.resetCalls()
 
 	retargeted := makeSpec("provider-b")
@@ -228,29 +314,25 @@ func TestRetargetedInputReplacesOnlyItsConsumer(t *testing.T) {
 		t.Fatal(err)
 	}
 	second := requireDesired(t, controller.State, retargeted.Name)
-	requireSameContainer(t, second, "provider-a", providerAID)
-	requireSameContainer(t, second, "provider-b", providerBID)
-	if second.Containers["consumer"].ID == consumerID {
-		t.Fatal("consumer retained a container configured for the old input target")
+	if second.Proxy.InstanceID == proxyID {
+		t.Fatal("retargeting retained the old proxy wiring")
 	}
-	if second.Networks["link/consumer/upstream"].ID != linkID {
-		t.Fatal("retargeting replaced the reusable private input network")
+	for name, oldID := range map[string]string{
+		"provider-a": providerAID,
+		"provider-b": providerBID,
+		"consumer":   consumerID,
+	} {
+		if second.Containers[name].ID == oldID {
+			t.Fatalf("retargeting retained %s with a stale socket mount", name)
+		}
 	}
-	requireMembers(
-		t,
-		requireNetwork(t, fake, linkID),
-		providerBID,
-		second.Containers["consumer"].ID,
-	)
-	assertContainerUntouched(t, fake, providerAID)
-	assertContainerUntouched(t, fake, providerBID)
 	request := requestsByComponent(fake.containerRequests)["consumer"]
-	if got, want := request.Environment["DCOMP_LINK_UPSTREAM"], "dns:///provider-b:50051"; got != want {
+	if got, want := request.Environment["DCOMP_IN_UPSTREAM"], "unix:///run/dcomp/in/upstream"; got != want {
 		t.Fatalf("consumer upstream = %q, want %q", got, want)
 	}
 }
 
-func TestFanoutUsesDistinctPrivateLinkNetworks(t *testing.T) {
+func TestFanoutUsesProxySocketsWithoutLinkNetworks(t *testing.T) {
 	controller, fake := newControllerHarness(t)
 	installImages(
 		fake,
@@ -263,38 +345,26 @@ func TestFanoutUsesDistinctPrivateLinkNetworks(t *testing.T) {
 	}
 	deployment := requireDesired(t, controller.State, spec.Name)
 
-	consumerLink := requireNetwork(
-		t, fake, deployment.Networks["link/consumer/upstream"].ID,
-	)
-	observerLink := requireNetwork(
-		t, fake, deployment.Networks["link/observer/upstream"].ID,
-	)
-	if consumerLink.ID == observerLink.ID {
-		t.Fatal("fanout consumers share one link network")
+	if got := len(deployment.Networks); got != 0 {
+		t.Fatalf("network count = %d, want none", got)
 	}
-	if !consumerLink.Internal || !observerLink.Internal {
-		t.Fatal("fanout link network permits external egress")
-	}
-	requireMembers(
-		t,
-		consumerLink,
-		deployment.Containers["provider"].ID,
-		deployment.Containers["consumer"].ID,
-	)
-	requireMembers(
-		t,
-		observerLink,
-		deployment.Containers["provider"].ID,
-		deployment.Containers["observer"].ID,
-	)
-	for _, id := range consumerLink.Containers {
-		if id == deployment.Containers["observer"].ID {
-			t.Fatal("observer can reach the consumer link network")
+	for _, name := range []string{"provider", "consumer", "observer"} {
+		request := requestsByComponent(fake.containerRequests)[name]
+		if request.NetworkID != "" || len(request.NetworkAliases) != 0 {
+			t.Fatalf("%s network request = %#v, want network mode none", name, request)
+		}
+		if networks := fake.containers[deployment.Containers[name].ID].Networks; len(networks) != 0 {
+			t.Fatalf("%s networks = %#v, want none", name, networks)
 		}
 	}
-	for _, id := range observerLink.Containers {
-		if id == deployment.Containers["consumer"].ID {
-			t.Fatal("consumer can reach the observer link network")
+	requests := requestsByComponent(fake.containerRequests)
+	for _, name := range []string{"consumer", "observer"} {
+		request := requests[name]
+		if request.Environment["DCOMP_IN_UPSTREAM"] != "unix:///run/dcomp/in/upstream" {
+			t.Fatalf("%s has unexpected input environment: %#v", name, request.Environment)
+		}
+		if !hasMountTarget(request.Mounts, "/run/dcomp/in/upstream") {
+			t.Fatalf("%s has no private input socket mount", name)
 		}
 	}
 }
@@ -311,14 +381,19 @@ func TestCyclesAreValidAndCreatedBeforeStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	deployment := requireDesired(t, controller.State, spec.Name)
-	if got, want := len(deployment.Networks), 4; got != want {
-		t.Fatalf("cycle network count = %d, want %d", got, want)
+	if got := len(deployment.Networks); got != 0 {
+		t.Fatalf("cycle network count = %d, want none", got)
 	}
 	requests := requestsByComponent(fake.containerRequests)
-	if got := requests["alpha"].Environment["DCOMP_LINK_PEER"]; got != "dns:///beta:50051" {
+	for _, name := range []string{"alpha", "beta"} {
+		if requests[name].NetworkID != "" {
+			t.Fatalf("%s received a Docker network", name)
+		}
+	}
+	if got := requests["alpha"].Environment["DCOMP_IN_PEER"]; got != "unix:///run/dcomp/in/peer" {
 		t.Fatalf("alpha peer = %q", got)
 	}
-	if got := requests["beta"].Environment["DCOMP_LINK_PEER"]; got != "dns:///alpha:50051" {
+	if got := requests["beta"].Environment["DCOMP_IN_PEER"]; got != "unix:///run/dcomp/in/peer" {
 		t.Fatalf("beta peer = %q", got)
 	}
 	mutations := fake.mutationCalls()
@@ -424,15 +499,16 @@ func TestSameSpecRepairsMissingKnownAttachmentWithoutRestart(t *testing.T) {
 		"sha256:provider", "sha256:consumer",
 	)
 	spec := linkedSpec("provider:v1", "consumer:v1")
+	spec.Components[1].Runtime.ExternalEgress = true
 	if err := controller.Up(context.Background(), spec); err != nil {
 		t.Fatal(err)
 	}
 	deployment := requireDesired(t, controller.State, spec.Name)
-	linkID := deployment.Networks["link/consumer/upstream"].ID
+	baseID := deployment.Networks["component/consumer"].ID
 	consumerID := deployment.Containers["consumer"].ID
 	if err := fake.DisconnectNetwork(
 		context.Background(),
-		linkID,
+		baseID,
 		consumerID,
 	); err != nil {
 		t.Fatal(err)
@@ -448,9 +524,9 @@ func TestSameSpecRepairsMissingKnownAttachmentWithoutRestart(t *testing.T) {
 	if !containsCall(
 		fake.mutationCalls(),
 		"connect-network",
-		linkID+"->"+consumerID,
+		baseID+"->"+consumerID,
 	) {
-		t.Fatalf("missing link attachment was not restored: %#v", fake.mutationCalls())
+		t.Fatalf("missing base attachment was not restored: %#v", fake.mutationCalls())
 	}
 	assertContainerUntouched(t, fake, deployment.Containers["provider"].ID)
 	assertContainerUntouched(t, fake, consumerID)
@@ -464,16 +540,17 @@ func TestSameSpecRepairsMissingNetworkAliasWithoutRestart(t *testing.T) {
 		"sha256:provider", "sha256:consumer",
 	)
 	spec := linkedSpec("provider:v1", "consumer:v1")
+	spec.Components[1].Runtime.ExternalEgress = true
 	if err := controller.Up(context.Background(), spec); err != nil {
 		t.Fatal(err)
 	}
 	deployment := requireDesired(t, controller.State, spec.Name)
-	linkID := deployment.Networks["link/consumer/upstream"].ID
+	baseID := deployment.Networks["component/consumer"].ID
 	consumerID := deployment.Containers["consumer"].ID
 	fake.mu.Lock()
 	consumer := fake.containers[consumerID]
 	for name, attachment := range consumer.Networks {
-		if attachment.NetworkID == linkID {
+		if attachment.NetworkID == baseID {
 			attachment.Aliases = nil
 			consumer.Networks[name] = attachment
 		}
@@ -486,7 +563,7 @@ func TestSameSpecRepairsMissingNetworkAliasWithoutRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	mutations := fake.mutationCalls()
-	target := linkID + "->" + consumerID
+	target := baseID + "->" + consumerID
 	if !containsCall(mutations, "disconnect-network", target) ||
 		!containsCall(mutations, "connect-network", target) {
 		t.Fatalf("missing alias was not restored by reattachment: %#v", mutations)
@@ -504,6 +581,7 @@ func TestAliasRepairResumesAfterLostDisconnectResponse(t *testing.T) {
 			component("worker", "worker:v1", nil, nil),
 		},
 	}
+	spec.Components[0].Runtime.ExternalEgress = true
 	if err := controller.Up(context.Background(), spec); err != nil {
 		t.Fatal(err)
 	}
@@ -546,7 +624,7 @@ func TestAliasRepairResumesAfterLostDisconnectResponse(t *testing.T) {
 	assertContainerUntouched(t, fake, workerID)
 }
 
-func TestResumeRepairsBaseNetworkRemovedByFailedStart(t *testing.T) {
+func TestResumeRepairsEgressNetworkRemovedByFailedStart(t *testing.T) {
 	controller, fake := newControllerHarness(t)
 	installImages(
 		fake,
@@ -554,6 +632,7 @@ func TestResumeRepairsBaseNetworkRemovedByFailedStart(t *testing.T) {
 		"sha256:provider", "sha256:consumer",
 	)
 	spec := linkedSpec("provider:v1", "consumer:v1")
+	spec.Components[1].Runtime.ExternalEgress = true
 	fake.startFailures["consumer"] = []error{errors.New("bind address already in use")}
 
 	err := controller.Up(context.Background(), spec)
@@ -586,7 +665,7 @@ func TestResumeRepairsBaseNetworkRemovedByFailedStart(t *testing.T) {
 		"connect-network",
 		baseID+"->"+consumerID,
 	) {
-		t.Fatalf("resume did not restore the base network: %#v", fake.mutationCalls())
+		t.Fatalf("resume did not restore the egress network: %#v", fake.mutationCalls())
 	}
 	if !fake.containers[consumerID].Running {
 		t.Fatal("consumer was not started after its network was repaired")
@@ -725,6 +804,7 @@ func TestLostCreateResponseIsRecoveredWithoutDuplicateResources(t *testing.T) {
 		"sha256:provider", "sha256:consumer",
 	)
 	spec := linkedSpec("provider:v1", "consumer:v1")
+	spec.Components[1].Runtime.ExternalEgress = true
 	fake.createNetworkErrors["dcomp.demo.component.consumer"] =
 		[]error{errors.New("lost create response")}
 
@@ -733,11 +813,11 @@ func TestLostCreateResponseIsRecoveredWithoutDuplicateResources(t *testing.T) {
 	}
 	requireDesired(t, controller.State, spec.Name)
 	requireNoOperation(t, controller.State, spec.Name)
-	if got := len(fake.callsFor("create-network")); got != 3 {
-		t.Fatalf("network creates = %d, want exactly 3", got)
+	if got := len(fake.callsFor("create-network")); got != 1 {
+		t.Fatalf("network creates = %d, want exactly 1", got)
 	}
-	if got := len(fake.networks); got != 3 {
-		t.Fatalf("network objects = %d, want 3", got)
+	if got := len(fake.networks); got != 1 {
+		t.Fatalf("network objects = %d, want 1", got)
 	}
 }
 
@@ -745,10 +825,10 @@ func TestAbortIncrementalApplyPreservesRetainedComponents(t *testing.T) {
 	controller, fake := newControllerHarness(t)
 	installImages(
 		fake,
-		"provider:v1", "consumer:v1", "observer:v1",
-		"sha256:provider", "sha256:consumer", "sha256:observer",
+		"provider:v1", "consumer:v1", "observer:v1", "observer:v2",
+		"sha256:provider", "sha256:consumer", "sha256:observer-v1", "sha256:observer-v2",
 	)
-	initial := linkedSpec("provider:v1", "consumer:v1")
+	initial := fanoutSpec("provider:v1", "consumer:v1", "observer:v1")
 	if err := controller.Up(context.Background(), initial); err != nil {
 		t.Fatal(err)
 	}
@@ -756,15 +836,13 @@ func TestAbortIncrementalApplyPreservesRetainedComponents(t *testing.T) {
 	providerID := previous.Containers["provider"].ID
 	consumerID := previous.Containers["consumer"].ID
 
-	// ConnectNetwork mutates Docker and then loses the response, the difficult
-	// boundary an abort must handle without deleting retained components.
-	fake.connectAnyErrors = []error{errors.New("lost connect response")}
+	fake.startFailures["observer"] = []error{errors.New("observer start failed")}
 	err := controller.Up(
 		context.Background(),
-		fanoutSpec("provider:v1", "consumer:v1", "observer:v1"),
+		fanoutSpec("provider:v1", "consumer:v1", "observer:v2"),
 	)
-	if err == nil || !strings.Contains(err.Error(), "lost connect response") {
-		t.Fatalf("Up error = %v, want injected connect error", err)
+	if err == nil || !strings.Contains(err.Error(), "observer start failed") {
+		t.Fatalf("Up error = %v, want injected start error", err)
 	}
 	requireOperation(t, controller.State, initial.Name)
 	fake.resetCalls()
@@ -858,9 +936,12 @@ func TestRestartLostResponseRetriesTheSameConvergentOperation(t *testing.T) {
 func newControllerHarness(t *testing.T) (*Controller, *fakeEngine) {
 	t.Helper()
 	fake := newFakeEngine()
+	runtimeRoot := t.TempDir()
 	controller := &Controller{
 		Engine:         fake,
+		Proxy:          newFakeProxyManager(),
 		State:          state.Store{Root: t.TempDir()},
+		RuntimeRoot:    runtimeRoot,
 		RequestTimeout: time.Second,
 		StopTimeout:    time.Millisecond,
 	}
@@ -1036,6 +1117,15 @@ func requireMembers(t *testing.T, network engine.Network, want ...string) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("%s members:\n got: %#v\nwant: %#v", network.Name, got, want)
 	}
+}
+
+func hasMountTarget(mounts []engine.Mount, target string) bool {
+	for _, mount := range mounts {
+		if mount.Target == target {
+			return true
+		}
+	}
+	return false
 }
 
 func requireSameContainer(

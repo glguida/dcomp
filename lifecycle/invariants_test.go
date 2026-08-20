@@ -108,19 +108,24 @@ func TestAbortRestoresPreviousDesiredAtCommitBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	operation, err := state.NewOperation(kindApply, phaseCommit, target, &previous)
+	operation, err := state.NewOperation(
+		kindApply, phaseCommit, target, &previous, controller.RuntimeRoot,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	operation.Networks = cloneResources(previous.Networks)
 	operation.Containers = cloneResources(previous.Containers)
+	operation.Proxy = cloneProxy(previous.Proxy)
 	if err := controller.State.WriteOperation(target.Name, operation); err != nil {
 		t.Fatal(err)
 	}
 	if err := controller.State.WriteDesired(target.Name, state.Deployment{
-		Spec:       target,
-		Networks:   cloneResources(operation.Networks),
-		Containers: cloneResources(operation.Containers),
+		Spec:        target,
+		RuntimeRoot: controller.RuntimeRoot,
+		Proxy:       cloneProxy(operation.Proxy),
+		Networks:    cloneResources(operation.Networks),
+		Containers:  cloneResources(operation.Containers),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -152,15 +157,27 @@ func TestAbortInitialApplyClearsDesiredWrittenAtCommitBoundary(t *testing.T) {
 	if err := controller.State.BindEngine(fake.identity); err != nil {
 		t.Fatal(err)
 	}
-	operation, err := state.NewOperation(kindApply, phaseCommit, target, nil)
+	operation, err := state.NewOperation(
+		kindApply, phaseCommit, target, nil, controller.RuntimeRoot,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
+	config, err := proxyConfig(target, controller.RuntimeRoot, operation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	process, err := controller.Proxy.Ensure(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation.Proxy = &process
 	if err := controller.State.WriteOperation(target.Name, operation); err != nil {
 		t.Fatal(err)
 	}
 	if err := controller.State.WriteDesired(target.Name, state.Deployment{
-		Spec: target, Networks: map[string]state.Resource{},
+		Spec: target, RuntimeRoot: controller.RuntimeRoot,
+		Proxy: cloneProxy(operation.Proxy), Networks: map[string]state.Resource{},
 		Containers: map[string]state.Resource{},
 	}); err != nil {
 		t.Fatal(err)
@@ -228,6 +245,7 @@ func TestAbortRefusesPendingNetworkCreateWithoutChangingOperation(t *testing.T) 
 		"sha256:provider", "sha256:consumer",
 	)
 	spec := linkedSpec("provider:v1", "consumer:v1")
+	spec.Components[1].Runtime.ExternalEgress = true
 	err := controller.Up(context.Background(), spec)
 	if err == nil || !strings.Contains(err.Error(), "ambiguous network create") {
 		t.Fatalf("Up error = %v", err)
@@ -280,6 +298,7 @@ func TestDifferentUpResolvesPendingCreateThenSupersedes(t *testing.T) {
 		"sha256:provider", "sha256:consumer-v1", "sha256:consumer-v2",
 	)
 	initial := linkedSpec("provider:v1", "consumer:v1")
+	initial.Components[1].Runtime.ExternalEgress = true
 	if err := controller.Up(context.Background(), initial); err == nil {
 		t.Fatal("initial Up unexpectedly succeeded")
 	}
@@ -297,6 +316,52 @@ func TestDifferentUpResolvesPendingCreateThenSupersedes(t *testing.T) {
 	consumer := base.containers[deployed.Containers["consumer"].ID]
 	if consumer.ImageID != "sha256:consumer-v2" {
 		t.Fatalf("replacement consumer image = %q", consumer.ImageID)
+	}
+}
+
+func TestDifferentUpDoesNotResolvePendingContainerAgainstDeadProxy(t *testing.T) {
+	base := newFakeEngine()
+	fake := &failFirstContainerCreate{
+		fakeEngine: base,
+		name:       "dcomp.demo.container.provider",
+	}
+	controller := controllerForEngine(t, fake)
+	installImages(
+		base,
+		"provider:v1", "consumer:v1", "consumer:v2",
+		"sha256:provider", "sha256:consumer-v1", "sha256:consumer-v2",
+	)
+	initial := linkedSpec("provider:v1", "consumer:v1")
+	if err := controller.Up(context.Background(), initial); err == nil {
+		t.Fatal("initial Up unexpectedly succeeded")
+	}
+	interrupted := requireOperation(t, controller.State, initial.Name)
+	if !interrupted.PendingCreates["container/provider"] {
+		t.Fatalf("pending container create was not durable: %#v", interrupted.PendingCreates)
+	}
+	manager := controller.Proxy.(*fakeProxyManager)
+	manager.mu.Lock()
+	delete(manager.processes, interrupted.Proxy.InstanceID)
+	delete(manager.configs, interrupted.Proxy.InstanceID)
+	manager.mu.Unlock()
+
+	replacement := linkedSpec("provider:v1", "consumer:v2")
+	if err := controller.Up(context.Background(), replacement); err != nil {
+		t.Fatal(err)
+	}
+	if got := countEngineCalls(
+		base.callsFor("create-container"),
+		"create-container",
+		fake.name,
+	); got != 2 {
+		t.Fatalf(
+			"provider create calls = %d, want interrupted request plus replacement only",
+			got,
+		)
+	}
+	deployed := requireDesired(t, controller.State, replacement.Name)
+	if got := base.containers[deployed.Containers["consumer"].ID].ImageID; got != "sha256:consumer-v2" {
+		t.Fatalf("replacement consumer image = %q", got)
 	}
 }
 
@@ -366,7 +431,9 @@ func controllerForEngine(t *testing.T, containerEngine engine.Engine) *Controlle
 	t.Helper()
 	return &Controller{
 		Engine:         containerEngine,
+		Proxy:          newFakeProxyManager(),
 		State:          state.Store{Root: t.TempDir()},
+		RuntimeRoot:    t.TempDir(),
 		RequestTimeout: time.Second,
 		StopTimeout:    time.Millisecond,
 	}

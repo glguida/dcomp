@@ -17,9 +17,10 @@ import (
 	"time"
 
 	"github.com/glguida/dcomp/composition"
+	"github.com/glguida/dcomp/proxy"
 )
 
-const formatVersion = 2
+const formatVersion = 3
 
 const engineBindingVersion = 1
 
@@ -29,29 +30,41 @@ type Resource struct {
 }
 
 type Deployment struct {
-	Version    int                      `json:"version"`
-	Spec       composition.ResolvedSpec `json:"spec"`
-	Networks   map[string]Resource      `json:"networks"`
-	Containers map[string]Resource      `json:"containers"`
+	Version     int                      `json:"version"`
+	Spec        composition.ResolvedSpec `json:"spec"`
+	RuntimeRoot string                   `json:"runtime_root"`
+	Proxy       *proxy.Process           `json:"proxy"`
+	Networks    map[string]Resource      `json:"networks"`
+	Containers  map[string]Resource      `json:"containers"`
 }
 
 type Operation struct {
-	Version    int                      `json:"version"`
-	ID         string                   `json:"id"`
-	Kind       string                   `json:"kind"`
-	Phase      string                   `json:"phase"`
-	Target     composition.ResolvedSpec `json:"target"`
-	Previous   *Deployment              `json:"previous,omitempty"`
-	Networks   map[string]Resource      `json:"networks"`
-	Containers map[string]Resource      `json:"containers"`
-	Components []string                 `json:"components,omitempty"`
-	Completed  map[string]bool          `json:"completed,omitempty"`
+	Version     int                      `json:"version"`
+	ID          string                   `json:"id"`
+	Kind        string                   `json:"kind"`
+	Phase       string                   `json:"phase"`
+	Target      composition.ResolvedSpec `json:"target"`
+	RuntimeRoot string                   `json:"runtime_root"`
+	Proxy       *proxy.Process           `json:"proxy,omitempty"`
+	Previous    *Deployment              `json:"previous,omitempty"`
+	Networks    map[string]Resource      `json:"networks"`
+	Containers  map[string]Resource      `json:"containers"`
+	Components  []string                 `json:"components,omitempty"`
+	Completed   map[string]bool          `json:"completed,omitempty"`
 	// PendingCreates records a create request before it is sent to Docker and
 	// is cleared in the same durable update that records the returned object.
 	PendingCreates map[string]bool `json:"pending_creates,omitempty"`
 }
 
-func NewOperation(kind, phase string, target composition.ResolvedSpec, previous *Deployment) (Operation, error) {
+func NewOperation(
+	kind, phase string,
+	target composition.ResolvedSpec,
+	previous *Deployment,
+	runtimeRoot string,
+) (Operation, error) {
+	if err := validateRuntimeRoot(runtimeRoot); err != nil {
+		return Operation{}, err
+	}
 	idBytes := make([]byte, 16)
 	if _, err := rand.Read(idBytes); err != nil {
 		return Operation{}, fmt.Errorf("generate operation ID: %w", err)
@@ -62,6 +75,7 @@ func NewOperation(kind, phase string, target composition.ResolvedSpec, previous 
 		Kind:           kind,
 		Phase:          phase,
 		Target:         target,
+		RuntimeRoot:    runtimeRoot,
 		Previous:       previous,
 		Networks:       make(map[string]Resource),
 		Containers:     make(map[string]Resource),
@@ -351,28 +365,17 @@ func (store Store) ReadDesired(name string) (Deployment, bool, error) {
 	if err != nil || !exists {
 		return Deployment{}, exists, err
 	}
-	if deployment.Version != formatVersion {
-		return Deployment{}, false, fmt.Errorf("unsupported desired state version %d", deployment.Version)
-	}
-	if deployment.Spec.Name != name {
-		return Deployment{}, false, fmt.Errorf(
-			"desired state belongs to system %q, not %q", deployment.Spec.Name, name,
-		)
-	}
-	if deployment.Containers == nil {
-		return Deployment{}, false, fmt.Errorf("desired state has no container map")
-	}
-	if deployment.Networks == nil {
-		return Deployment{}, false, fmt.Errorf("desired state has no network map")
+	if err := validateDeployment(name, deployment); err != nil {
+		return Deployment{}, false, err
 	}
 	return deployment, true, nil
 }
 
 func (store Store) WriteDesired(name string, deployment Deployment) error {
-	if deployment.Spec.Name != name {
-		return fmt.Errorf("refusing to write %q desired state under %q", deployment.Spec.Name, name)
-	}
 	deployment.Version = formatVersion
+	if err := validateDeployment(name, deployment); err != nil {
+		return err
+	}
 	return store.write(name, "desired.json", deployment)
 }
 
@@ -386,28 +389,8 @@ func (store Store) ReadOperation(name string) (Operation, bool, error) {
 	if err != nil || !exists {
 		return Operation{}, exists, err
 	}
-	if operation.Version != formatVersion {
-		return Operation{}, false, fmt.Errorf("unsupported operation state version %d", operation.Version)
-	}
-	if operation.ID == "" || operation.Kind == "" || operation.Phase == "" {
-		return Operation{}, false, fmt.Errorf("operation state is incomplete")
-	}
-	if operation.Target.Name != name {
-		return Operation{}, false, fmt.Errorf(
-			"operation state belongs to system %q, not %q", operation.Target.Name, name,
-		)
-	}
-	if operation.Previous != nil && operation.Previous.Spec.Name != name {
-		return Operation{}, false, fmt.Errorf(
-			"previous deployment belongs to system %q, not %q",
-			operation.Previous.Spec.Name, name,
-		)
-	}
-	if operation.Containers == nil {
-		return Operation{}, false, fmt.Errorf("operation state has no container map")
-	}
-	if operation.Networks == nil {
-		return Operation{}, false, fmt.Errorf("operation state has no network map")
+	if err := validateOperation(name, operation); err != nil {
+		return Operation{}, false, err
 	}
 	if operation.Completed == nil {
 		operation.Completed = make(map[string]bool)
@@ -419,17 +402,90 @@ func (store Store) ReadOperation(name string) (Operation, bool, error) {
 }
 
 func (store Store) WriteOperation(name string, operation Operation) error {
-	if operation.Target.Name != name {
-		return fmt.Errorf("refusing to write %q operation state under %q", operation.Target.Name, name)
+	operation.Version = formatVersion
+	if operation.Previous != nil {
+		previous := *operation.Previous
+		previous.Version = formatVersion
+		operation.Previous = &previous
 	}
-	if operation.Previous != nil && operation.Previous.Spec.Name != name {
+	if err := validateOperation(name, operation); err != nil {
+		return err
+	}
+	return store.write(name, "operation.json", operation)
+}
+
+func validateDeployment(name string, deployment Deployment) error {
+	if deployment.Version != formatVersion {
+		return fmt.Errorf("unsupported desired state version %d", deployment.Version)
+	}
+	if deployment.Spec.Name != name {
 		return fmt.Errorf(
-			"refusing to write previous %q deployment under %q",
-			operation.Previous.Spec.Name, name,
+			"desired state belongs to system %q, not %q", deployment.Spec.Name, name,
 		)
 	}
-	operation.Version = formatVersion
-	return store.write(name, "operation.json", operation)
+	if deployment.Containers == nil {
+		return fmt.Errorf("desired state has no container map")
+	}
+	if deployment.Networks == nil {
+		return fmt.Errorf("desired state has no network map")
+	}
+	if err := validateRuntimeRoot(deployment.RuntimeRoot); err != nil {
+		return fmt.Errorf("desired state: %w", err)
+	}
+	if deployment.Proxy == nil {
+		return fmt.Errorf("desired state has no proxy record")
+	}
+	if err := deployment.Proxy.Validate(); err != nil {
+		return fmt.Errorf("desired state has invalid proxy record: %w", err)
+	}
+	if deployment.Proxy.RuntimeDir != filepath.Join(deployment.RuntimeRoot, name) {
+		return fmt.Errorf("desired state proxy is outside its runtime root")
+	}
+	return nil
+}
+
+func validateOperation(name string, operation Operation) error {
+	if operation.Version != formatVersion {
+		return fmt.Errorf("unsupported operation state version %d", operation.Version)
+	}
+	if operation.ID == "" || operation.Kind == "" || operation.Phase == "" {
+		return fmt.Errorf("operation state is incomplete")
+	}
+	if operation.Target.Name != name {
+		return fmt.Errorf(
+			"operation state belongs to system %q, not %q", operation.Target.Name, name,
+		)
+	}
+	if operation.Containers == nil {
+		return fmt.Errorf("operation state has no container map")
+	}
+	if operation.Networks == nil {
+		return fmt.Errorf("operation state has no network map")
+	}
+	if err := validateRuntimeRoot(operation.RuntimeRoot); err != nil {
+		return fmt.Errorf("operation state: %w", err)
+	}
+	if operation.Proxy != nil {
+		if err := operation.Proxy.Validate(); err != nil {
+			return fmt.Errorf("operation state has invalid proxy record: %w", err)
+		}
+		if operation.Proxy.RuntimeDir != filepath.Join(operation.RuntimeRoot, name) {
+			return fmt.Errorf("operation state proxy is outside its runtime root")
+		}
+	}
+	if operation.Previous != nil {
+		if err := validateDeployment(name, *operation.Previous); err != nil {
+			return fmt.Errorf("previous deployment is invalid: %w", err)
+		}
+	}
+	return nil
+}
+
+func validateRuntimeRoot(root string) error {
+	if root == "" || !filepath.IsAbs(root) || filepath.Clean(root) != root {
+		return fmt.Errorf("runtime root is not an absolute clean path")
+	}
+	return nil
 }
 
 func (store Store) ClearOperation(name string) error {

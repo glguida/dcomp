@@ -1,0 +1,2 @@
+docker dcomp-example-caller:dev
+input dcomp.example.v1.Echo upstream

@@ -72,6 +72,12 @@ func (controller *Controller) Attach(
 	if err := controller.verifyEngineBinding(ctx); err != nil {
 		return err
 	}
+	if deployment.Proxy == nil {
+		return fmt.Errorf("system %q has no recorded proxy", system)
+	}
+	if _, err := controller.inspectProxy(ctx, *deployment.Proxy); err != nil {
+		return fmt.Errorf("inspect proxy before attachment: %w", err)
+	}
 
 	attachmentLock, err := controller.State.AcquireAttachment(
 		ctx,
@@ -93,6 +99,7 @@ func (controller *Controller) Attach(
 	}
 	if err := verifyCurrentContainer(
 		deployment.Spec.Name,
+		deployment.Proxy.RuntimeDir,
 		component,
 		resource,
 		container,

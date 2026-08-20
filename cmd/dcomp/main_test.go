@@ -36,7 +36,7 @@ func TestPSJSONListsNoComponentsForEmptyState(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("ps exit code = %d, want 0", code)
 	}
-	const want = "{\"api_version\":1,\"components\":[]}\n"
+	const want = "{\"api_version\":2,\"components\":[]}\n"
 	if output != want {
 		t.Fatalf("ps output = %q, want %q", output, want)
 	}
@@ -111,7 +111,7 @@ func TestVolumeJSONInspectsExactOwnedVolume(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("volume exit code = %d, want 0", code)
 	}
-	const want = "{\"api_version\":1,\"system\":\"demo\"," +
+	const want = "{\"api_version\":2,\"system\":\"demo\"," +
 		"\"component\":\"worker\",\"logical_name\":\"state\"," +
 		"\"name\":\"dcomp.demo.volume.worker.state\"}\n"
 	if output != want {

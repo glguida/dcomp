@@ -13,11 +13,12 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/glguida/dcomp/internal/runtimecontract"
 )
 
-// ComponentPort is the conventional gRPC port inside every component.
-// Containers have separate network namespaces, so they can all use it.
-const ComponentPort = 50051
+// ComponentSocketRoot is reserved for orchestrator-owned interface mounts.
+const ComponentSocketRoot = runtimecontract.ContainerRoot
 
 var (
 	namePattern    = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
@@ -117,7 +118,6 @@ type ResolvedComponent struct {
 	Name       string     `json:"name"`
 	ImageRef   string     `json:"image_ref"`
 	ImageID    string     `json:"image_id"`
-	Port       int        `json:"port"`
 	Definition Definition `json:"definition"`
 	Runtime    Runtime    `json:"runtime"`
 	Digest     string     `json:"digest"`
@@ -159,6 +159,9 @@ func ValidateRuntime(runtime Runtime) error {
 		if err := validateMountTarget(bind.Target); err != nil {
 			return fmt.Errorf("bind target %q: %w", bind.Target, err)
 		}
+		if mountTargetsOverlap(bind.Target, ComponentSocketRoot) {
+			return fmt.Errorf("bind target %q overlaps reserved DComp interface root %s", bind.Target, ComponentSocketRoot)
+		}
 		targets = append(targets, bind.Target)
 	}
 
@@ -173,6 +176,9 @@ func ValidateRuntime(runtime Runtime) error {
 		volumeNames[volume.Name] = struct{}{}
 		if err := validateMountTarget(volume.Target); err != nil {
 			return fmt.Errorf("volume target %q: %w", volume.Target, err)
+		}
+		if mountTargetsOverlap(volume.Target, ComponentSocketRoot) {
+			return fmt.Errorf("volume target %q overlaps reserved DComp interface root %s", volume.Target, ComponentSocketRoot)
 		}
 		targets = append(targets, volume.Target)
 	}
@@ -307,7 +313,7 @@ func Validate(spec Spec) error {
 			!instance.Runtime.ExternalEgress {
 			return fmt.Errorf(
 				"component %q publishes host ports but has no egress directive; "+
-					"Docker cannot publish ports from an internal-only bridge",
+					"Docker cannot publish ports with network mode none",
 				instance.Name,
 			)
 		}
@@ -396,7 +402,6 @@ func Resolve(spec Spec, images map[string]ResolvedImage) (ResolvedSpec, error) {
 			Name:       instance.Name,
 			ImageRef:   instance.Component.Image,
 			ImageID:    image.ID,
-			Port:       ComponentPort,
 			Definition: cloneDefinition(instance.Component.Definition),
 			Runtime:    cloneRuntime(instance.Runtime),
 		})
@@ -488,7 +493,7 @@ type inboundLinkIdentity struct {
 // launch contract changes. Including it in component identity makes the next
 // `up` replace containers created under an older policy without changing the
 // user-authored component or system grammar.
-const componentRuntimePolicyVersion = 2
+const componentRuntimePolicyVersion = 3
 
 func (spec ResolvedSpec) computeComponentDigest(component ResolvedComponent) (string, error) {
 	copy := component

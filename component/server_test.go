@@ -3,7 +3,9 @@ package component
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -167,6 +169,51 @@ func TestFatalListenerErrorShutsDownExistingTransports(t *testing.T) {
 	defer cancelCheck()
 	if _, err := healthClient.Check(checkCtx, &healthpb.HealthCheckRequest{}); err == nil {
 		t.Fatal("existing transport remained usable after fatal listener failure")
+	}
+}
+
+func TestDialListenerReconnectsAfterUnclaimedStreamCloses(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "output.sock")
+	upstream, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upstream.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	listener := newDialListener(ctx, path)
+	defer listener.Close()
+	upstreamResult := make(chan error, 1)
+	go func() {
+		first, acceptErr := upstream.Accept()
+		if acceptErr != nil {
+			upstreamResult <- acceptErr
+			return
+		}
+		_ = first.Close()
+		second, acceptErr := upstream.Accept()
+		if acceptErr == nil {
+			_, acceptErr = second.Write([]byte("x"))
+			_ = second.Close()
+		}
+		upstreamResult <- acceptErr
+	}()
+
+	connection, err := listener.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	var value [1]byte
+	if _, err := io.ReadFull(connection, value[:]); err != nil {
+		t.Fatal(err)
+	}
+	if value[0] != 'x' {
+		t.Fatalf("first byte = %q", value[0])
+	}
+	if err := <-upstreamResult; err != nil {
+		t.Fatal(err)
 	}
 }
 

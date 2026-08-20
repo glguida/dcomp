@@ -5,6 +5,8 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/glguida/dcomp/component"
@@ -15,12 +17,39 @@ import (
 
 func main() {
 	timeout := flag.Duration("timeout", 10*time.Second, "connection and request timeout")
+	wait := flag.Bool("wait", false, "remain idle as a system-managed test consumer")
 	flag.Parse()
+	if *wait {
+		if flag.NArg() != 0 {
+			log.Fatal("usage: caller --wait")
+		}
+		target, err := component.InputTarget("upstream")
+		if err != nil {
+			log.Fatal(err)
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		connection, err := grpc.DialContext(
+			ctx,
+			target,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithBlock(),
+		)
+		if err != nil {
+			if ctx.Err() == nil {
+				log.Fatalf("connect to upstream: %v", err)
+			}
+			return
+		}
+		defer connection.Close()
+		<-ctx.Done()
+		return
+	}
 	if flag.NArg() != 1 {
 		log.Fatal("usage: caller [--timeout DURATION] TEXT")
 	}
 
-	target, err := component.LinkTarget("upstream")
+	target, err := component.InputTarget("upstream")
 	if err != nil {
 		log.Fatal(err)
 	}

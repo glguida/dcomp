@@ -9,6 +9,7 @@ import (
 
 	"github.com/glguida/dcomp/composition"
 	"github.com/glguida/dcomp/engine"
+	"github.com/glguida/dcomp/proxy"
 	"github.com/glguida/dcomp/state"
 )
 
@@ -19,6 +20,22 @@ func (controller *Controller) deploymentMatches(
 ) (bool, error) {
 	if deployment.Spec.Digest != target.Digest {
 		return false, nil
+	}
+	if deployment.RuntimeRoot != controller.RuntimeRoot || deployment.Proxy == nil {
+		return false, nil
+	}
+	targetProxy, err := proxyConfig(target, controller.RuntimeRoot, deployment.Proxy.InstanceID)
+	if err != nil {
+		return false, err
+	}
+	if deployment.Proxy.Digest != targetProxy.Digest ||
+		deployment.Proxy.RuntimeDir != targetProxy.RuntimeDir {
+		return false, nil
+	}
+	if _, inspectErr := controller.inspectProxy(ctx, *deployment.Proxy); errors.Is(inspectErr, proxy.ErrNotRunning) {
+		return false, nil
+	} else if inspectErr != nil {
+		return false, inspectErr
 	}
 	plans, err := resolvedTopology(target)
 	if err != nil {
@@ -56,7 +73,9 @@ func (controller *Controller) deploymentMatches(
 		if inspectErr != nil {
 			return false, inspectErr
 		}
-		if err := verifyCurrentContainer(target.Name, component, resource, actual); err != nil {
+		if err := verifyCurrentContainer(
+			target.Name, deployment.Proxy.RuntimeDir, component, resource, actual,
+		); err != nil {
 			if errors.Is(err, errStandardIOPolicy) {
 				return false, nil
 			}
@@ -130,6 +149,25 @@ func (controller *Controller) selectRetainedResources(
 	if err != nil {
 		return err
 	}
+	retainComponents := false
+	if operation.Previous.Proxy != nil &&
+		operation.Previous.RuntimeRoot == operation.RuntimeRoot {
+		targetConfig, configErr := proxyConfig(
+			operation.Target, operation.RuntimeRoot, operation.Previous.Proxy.InstanceID,
+		)
+		if configErr != nil {
+			return configErr
+		}
+		if operation.Previous.Proxy.Digest == targetConfig.Digest &&
+			operation.Previous.Proxy.RuntimeDir == targetConfig.RuntimeDir {
+			if _, inspectErr := controller.inspectProxy(ctx, *operation.Previous.Proxy); inspectErr == nil {
+				operation.Proxy = cloneProxy(operation.Previous.Proxy)
+				retainComponents = true
+			} else if !errors.Is(inspectErr, proxy.ErrNotRunning) {
+				return inspectErr
+			}
+		}
+	}
 	for _, key := range sortedNetworkKeys(targetPlans) {
 		targetPlan := targetPlans[key]
 		previousPlan, exists := previousPlans[key]
@@ -157,6 +195,9 @@ func (controller *Controller) selectRetainedResources(
 		}
 		operation.Networks[key] = resource
 	}
+	if !retainComponents {
+		return nil
+	}
 	for _, component := range operation.Target.Components {
 		previousComponent, exists := operation.Previous.Spec.Component(component.Name)
 		if !exists || previousComponent.Digest != component.Digest {
@@ -175,6 +216,7 @@ func (controller *Controller) selectRetainedResources(
 		}
 		if err := verifyCurrentContainer(
 			operation.Target.Name,
+			operation.Previous.Proxy.RuntimeDir,
 			component,
 			resource,
 			actual,
@@ -204,6 +246,15 @@ func (controller *Controller) executeApply(
 	operation *state.Operation,
 ) error {
 	for {
+		if applyPhaseUsesProxy(operation.Phase) {
+			recovered, err := controller.recoverMissingTargetProxy(ctx, operation)
+			if err != nil {
+				return err
+			}
+			if recovered {
+				continue
+			}
+		}
 		switch operation.Phase {
 		case phaseRetire:
 			if err := controller.retireChangedContainers(ctx, operation); err != nil {
@@ -214,6 +265,13 @@ func (controller *Controller) executeApply(
 			}
 		case phaseNetworks:
 			if err := controller.ensureTargetNetworks(ctx, operation); err != nil {
+				return err
+			}
+			if err := controller.setPhase(operation, phaseProxy); err != nil {
+				return err
+			}
+		case phaseProxy:
+			if err := controller.ensureTargetProxy(ctx, operation); err != nil {
 				return err
 			}
 			if err := controller.setPhase(operation, phaseCreate); err != nil {
@@ -248,10 +306,15 @@ func (controller *Controller) executeApply(
 				return err
 			}
 		case phaseCommit:
+			if operation.Proxy == nil {
+				return fmt.Errorf("cannot commit %s without a proxy", operation.Target.Name)
+			}
 			deployment := state.Deployment{
-				Spec:       operation.Target,
-				Networks:   cloneResources(operation.Networks),
-				Containers: cloneResources(operation.Containers),
+				Spec:        operation.Target,
+				RuntimeRoot: operation.RuntimeRoot,
+				Proxy:       cloneProxy(operation.Proxy),
+				Networks:    cloneResources(operation.Networks),
+				Containers:  cloneResources(operation.Containers),
 			}
 			if err := controller.State.WriteDesired(operation.Target.Name, deployment); err != nil {
 				return err
@@ -302,6 +365,7 @@ func (controller *Controller) retireChangedContainers(
 		}
 		if err := verifyContainerCore(
 			operation.Target.Name,
+			operation.Previous.Proxy.RuntimeDir,
 			component,
 			previousResource,
 			actual,
@@ -345,6 +409,16 @@ func (controller *Controller) retireChangedContainers(
 		}
 		controller.report("retired component %s", component.Name)
 	}
+	if !proxyProcessMatches(operation.Proxy, operation.Previous.Proxy) &&
+		!operation.Completed["retire/proxy"] {
+		if err := controller.stopRecordedProxy(ctx, operation.Previous.Proxy); err != nil {
+			return fmt.Errorf("stop replaced proxy: %w", err)
+		}
+		if err := controller.markComplete(operation, "retire/proxy"); err != nil {
+			return err
+		}
+		controller.report("stopped replaced proxy for %s", operation.Target.Name)
+	}
 	return nil
 }
 
@@ -376,6 +450,7 @@ func (controller *Controller) preflightApply(
 			}
 			if err := verifyContainerCore(
 				operation.Target.Name,
+				operation.Previous.Proxy.RuntimeDir,
 				component,
 				resource,
 				actual,
@@ -714,12 +789,17 @@ func (controller *Controller) ensureContainer(
 	plans map[string]networkPlan,
 	component composition.ResolvedComponent,
 ) error {
+	if operation.Proxy == nil {
+		return fmt.Errorf("cannot create %s before the proxy is ready", component.Name)
+	}
+	runtimeDir := operation.Proxy.RuntimeDir
 	pendingKey := containerCreateKey(component.Name)
 	if resource, exists := operation.Containers[component.Name]; exists {
 		actual, err := controller.inspectContainer(ctx, resource.ID)
 		if err == nil {
 			if err := verifyCurrentContainer(
 				operation.Target.Name,
+				runtimeDir,
 				component,
 				resource,
 				actual,
@@ -748,6 +828,7 @@ func (controller *Controller) ensureContainer(
 		resource := state.Resource{ID: actual.ID, Name: actual.Name}
 		if err := verifyCurrentContainer(
 			operation.Target.Name,
+			runtimeDir,
 			component,
 			resource,
 			actual,
@@ -762,9 +843,15 @@ func (controller *Controller) ensureContainer(
 		return err
 	}
 
-	base, exists := operation.Networks[componentNetworkKey(component.Name)]
-	if !exists {
-		return fmt.Errorf("%s has no base network", component.Name)
+	var networkID string
+	var networkAliases []string
+	if component.Runtime.ExternalEgress {
+		base, exists := operation.Networks[componentNetworkKey(component.Name)]
+		if !exists {
+			return fmt.Errorf("%s has no egress network", component.Name)
+		}
+		networkID = base.ID
+		networkAliases = []string{component.Name}
 	}
 	environment, err := componentEnvironment(operation.Target, component)
 	if err != nil {
@@ -779,15 +866,17 @@ func (controller *Controller) ensureContainer(
 		engine.ContainerRequest{
 			Name:           name,
 			ImageID:        component.ImageID,
-			NetworkID:      base.ID,
-			NetworkAliases: []string{component.Name},
+			NetworkID:      networkID,
+			NetworkAliases: networkAliases,
 			Labels: expectedContainerLabels(
 				operation.Target.Name,
 				component,
 				operation.ID,
 			),
-			Environment:  environment,
-			Mounts:       componentMounts(operation.Target.Name, component),
+			Environment: environment,
+			Mounts: componentMounts(
+				operation.Target.Name, runtimeDir, component,
+			),
 			Args:         append([]string(nil), component.Runtime.Args...),
 			PortBindings: componentPorts(component),
 			StopTimeout:  controller.stopTimeout(),
@@ -805,6 +894,7 @@ func (controller *Controller) ensureContainer(
 	resource := state.Resource{ID: actual.ID, Name: actual.Name}
 	if err := verifyCurrentContainer(
 		operation.Target.Name,
+		runtimeDir,
 		component,
 		resource,
 		actual,
@@ -814,8 +904,17 @@ func (controller *Controller) ensureContainer(
 	if err := verifyContainerEnvironment(operation.Target, component, actual); err != nil {
 		return err
 	}
-	if _, _, attached := findContainerNetwork(actual, base); !attached {
-		return fmt.Errorf("%s was not created on its base network", component.Name)
+	if component.Runtime.ExternalEgress {
+		base := operation.Networks[componentNetworkKey(component.Name)]
+		if _, _, attached := findContainerNetwork(actual, base); !attached {
+			return fmt.Errorf("%s was not created on its egress network", component.Name)
+		}
+	} else if len(actual.Networks) != 0 {
+		return fmt.Errorf(
+			"%s was created with %d networks, expected network mode none",
+			component.Name,
+			len(actual.Networks),
+		)
 	}
 	if err := controller.recordContainer(operation, component.Name, resource); err != nil {
 		return err
@@ -852,6 +951,11 @@ func (controller *Controller) resolvePendingCreates(
 	if err != nil {
 		return err
 	}
+	if operation.PendingCreates[proxyCreateKey] {
+		if err := controller.ensureTargetProxy(ctx, operation); err != nil {
+			return err
+		}
+	}
 	keys := make([]string, 0, len(operation.PendingCreates))
 	for key, pending := range operation.PendingCreates {
 		if !pending {
@@ -861,6 +965,9 @@ func (controller *Controller) resolvePendingCreates(
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
+		if key == proxyCreateKey {
+			continue
+		}
 		switch {
 		case strings.HasPrefix(key, "network/"):
 			planKey := strings.TrimPrefix(key, "network/")
@@ -987,6 +1094,7 @@ func (controller *Controller) reconcileAttachments(
 		}
 		if err := verifyCurrentContainer(
 			operation.Target.Name,
+			operation.Proxy.RuntimeDir,
 			component,
 			resource,
 			actual,
@@ -1061,7 +1169,7 @@ func (controller *Controller) reconcileAttachments(
 				err,
 			)
 		}
-		controller.report("attached %s to an interface network", change.component)
+		controller.report("attached %s to its egress network", change.component)
 	}
 	for _, change := range reconnects {
 		callCtx, cancel := controller.callContext(ctx)
@@ -1197,6 +1305,12 @@ func (controller *Controller) startNewContainers(
 	ctx context.Context,
 	operation *state.Operation,
 ) error {
+	if operation.Proxy == nil {
+		return fmt.Errorf("cannot start components without a proxy")
+	}
+	if _, err := controller.inspectProxy(ctx, *operation.Proxy); err != nil {
+		return fmt.Errorf("inspect proxy before starting components: %w", err)
+	}
 	plans, err := resolvedTopology(operation.Target)
 	if err != nil {
 		return err
@@ -1221,6 +1335,7 @@ func (controller *Controller) startNewContainers(
 		}
 		if err := verifyCurrentContainer(
 			operation.Target.Name,
+			operation.Proxy.RuntimeDir,
 			component,
 			resource,
 			actual,

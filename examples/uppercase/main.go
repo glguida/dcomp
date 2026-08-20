@@ -31,7 +31,7 @@ func (server uppercaseServer) Echo(ctx context.Context, request *examplev1.EchoR
 }
 
 func main() {
-	target, err := component.LinkTarget("upstream")
+	target, err := component.InputTarget("upstream")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -43,7 +43,7 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	server, err := component.NewServer()
+	server, err := component.NewServer(component.WithOutput("echo"))
 	if err != nil {
 		log.Fatal(err)
 	}

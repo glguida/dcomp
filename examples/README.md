@@ -1,98 +1,98 @@
-# Example system
+# DComp 0.2 examples
 
-The managed system contains an `uppercase` component whose `upstream` input is
-linked directly to the `echo` component's output.
-
-These examples choose protobuf/gRPC and implement
-`dcomp.example.v1.Echo`. They use the optional Go component package for gRPC
-multiplexing, standard health, reflection, link lookup, and bounded shutdown.
-That protocol stack is an example convention, not a requirement of DComp's
-substrate.
-
-The component descriptors are:
+The example system demonstrates a two-hop gRPC pipeline carried only by
+orchestrator-owned Unix sockets:
 
 ```text
-# echo/component.dcomp
-docker dcomp-example-echo:dev
-output dcomp.example.v1.Echo echo
+caller.upstream -> uppercase.echo
+uppercase.upstream -> echo.echo
 ```
 
-```text
-# uppercase/component.dcomp
-docker dcomp-example-uppercase:dev
-input dcomp.example.v1.Echo upstream
-output dcomp.example.v1.Echo echo
-```
+`echo` returns its request. `uppercase` calls `echo`, uppercases the response,
+and serves it on its own output. `caller --wait` is the system-managed sink
+used to declare the final input; the same caller image can make a one-shot RPC
+when its input socket is mounted into a test container.
 
-`system.dcomp` creates one instance of each and links the input directly:
+The descriptors keep the ordinary syntax:
 
 ```text
 system demo
+
 component echo echo
 component uppercase uppercase
-publish uppercase tcp 127.0.0.1 50052 50051
-egress uppercase
+component caller caller
+
+args caller --wait
 link uppercase.upstream echo.echo
+link caller.upstream uppercase.echo
 ```
 
-The explicit `publish` makes the final service available only at
-`127.0.0.1:50052`. Docker cannot publish from an internal-only bridge, so the
-separate `egress uppercase` permission is required. DComp still gives the link
-a private internal network containing only `echo` and `uppercase`.
-
-DComp injects this target into `uppercase`:
+DComp injects addresses such as:
 
 ```text
-DCOMP_LINK_UPSTREAM=dns:///echo:50051
+DCOMP_IN_UPSTREAM=unix:///run/dcomp/in/upstream
+DCOMP_OUT_ECHO=unix:///run/dcomp/out/echo
 ```
 
-DComp matches the two declared interface identifiers nominally and injects the
-address. It does not load the example `.proto`, inspect reflection, or decode
-the RPC payload.
+The programs use `component.InputTarget` for gRPC clients and
+`component.NewServer(component.WithOutput("echo"))` for client-only gRPC
+outputs. None binds or listens on a DComp interface socket.
 
-Build each example image with the repository root as its Docker build context:
+Build the three images and DComp binaries:
 
 ```sh
-docker build -f examples/echo/Dockerfile -t dcomp-example-echo:dev .
-docker build -f examples/uppercase/Dockerfile -t dcomp-example-uppercase:dev .
-docker build -f examples/caller/Dockerfile -t dcomp-example-caller:dev .
+make build
+make examples
 ```
 
-DComp does not perform these builds. The caller image is a one-shot test client,
-not a component in `system.dcomp`.
-
-Run and inspect the system:
+Apply the system:
 
 ```sh
-bin/dcomp check examples/system.dcomp
 bin/dcomp up examples/system.dcomp
 bin/dcomp status demo
-bin/dcomp logs demo
 ```
 
-Exercise the explicitly published output:
+The final input is deliberately not published as TCP. For a manual call, find
+the selected runtime root (default `/var/run/dcomp`) and bind-mount the exact
+caller input socket into a one-shot caller container:
 
 ```sh
-docker run --rm --network host \
-  -e DCOMP_LINK_UPSTREAM=dns:///127.0.0.1:50052 \
-  dcomp-example-caller:dev "hello components"
+docker run --rm --network none \
+  --mount type=bind,src=/var/run/dcomp/demo/in/caller.upstream,dst=/run/dcomp/in/upstream \
+  -e DCOMP_IN_UPSTREAM=unix:///run/dcomp/in/upstream \
+  dcomp-example-caller:dev 'hello components'
 ```
 
-The expected response is `HELLO COMPONENTS`. Remove the system with:
+Expected output:
+
+```text
+HELLO COMPONENTS
+```
+
+This extra container is only a demonstration client. Managed component
+containers receive their endpoint mounts automatically and individually.
+
+Observe both component and proxy records:
+
+```sh
+bin/dcomp logs demo
+bin/dcomp logs demo @proxy
+```
+
+Restart one component without replacing the proxy:
+
+```sh
+bin/dcomp restart demo uppercase
+```
+
+Remove containers, the per-system proxy, endpoint sockets, and transient
+egress networks:
 
 ```sh
 bin/dcomp down demo
 ```
 
-Other systems may add instance policy after a `component` declaration:
-
-```text
-bind worker ./config /etc/worker ro
-volume worker state /var/lib/worker rw
-args worker serve --mode production
-egress worker
-```
-
-Bind sources are relative to `system.dcomp`; named volumes persist across
-replacement and `down`. Arguments are whitespace-delimited, and external
-network access is denied unless `egress` is declared.
+`make integration` automates this flow and additionally checks network mode
+`none` for components without egress, the caller's single egress bridge, the
+absence of the old `DCOMP_LINK_*` environment, proxy survival across a
+component restart, and complete proxy/container/network cleanup during down.

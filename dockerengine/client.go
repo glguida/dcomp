@@ -263,6 +263,11 @@ func (client *Client) InspectContainer(ctx context.Context, idOrName string) (en
 	}
 	networks := make(map[string]engine.NetworkAttachment, len(raw.NetworkSettings.Networks))
 	for name, attachment := range raw.NetworkSettings.Networks {
+		// Docker reports its built-in "none" network in NetworkSettings even
+		// though NetworkMode=none has no attachable network resource.
+		if name == "none" {
+			continue
+		}
 		networks[name] = engine.NetworkAttachment{
 			NetworkID: attachment.NetworkID,
 			Aliases:   cloneSlice(attachment.Aliases),

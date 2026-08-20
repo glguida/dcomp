@@ -9,6 +9,8 @@ import (
 
 	"github.com/glguida/dcomp/composition"
 	"github.com/glguida/dcomp/engine"
+	"github.com/glguida/dcomp/internal/runtimecontract"
+	"github.com/glguida/dcomp/proxy"
 	"github.com/glguida/dcomp/state"
 )
 
@@ -144,6 +146,7 @@ func verifyVolume(
 
 func verifyContainerCore(
 	system string,
+	runtimeDir string,
 	component composition.ResolvedComponent,
 	resource state.Resource,
 	actual engine.Container,
@@ -191,7 +194,7 @@ func verifyContainerCore(
 	if !reflect.DeepEqual(actual.Security, componentSecurity()) {
 		return fmt.Errorf("%s has unexpected security policy", component.Name)
 	}
-	expectedMounts := componentMounts(system, component)
+	expectedMounts := componentMounts(system, runtimeDir, component)
 	if !equalMounts(actual.Mounts, expectedMounts) {
 		return fmt.Errorf("%s has unexpected mounts", component.Name)
 	}
@@ -208,11 +211,12 @@ func verifyContainerCore(
 
 func verifyCurrentContainer(
 	system string,
+	runtimeDir string,
 	component composition.ResolvedComponent,
 	resource state.Resource,
 	actual engine.Container,
 ) error {
-	if err := verifyContainerCore(system, component, resource, actual); err != nil {
+	if err := verifyContainerCore(system, runtimeDir, component, resource, actual); err != nil {
 		return err
 	}
 	if !actual.OpenStdin || actual.StdinOnce || actual.TTY {
@@ -455,12 +459,14 @@ func verifyNoUnknownNetworkMembers(
 
 func componentMounts(
 	system string,
+	runtimeDir string,
 	component composition.ResolvedComponent,
 ) []engine.Mount {
 	mounts := make(
 		[]engine.Mount,
 		0,
-		len(component.Runtime.Binds)+len(component.Runtime.Volumes),
+		len(component.Runtime.Binds)+len(component.Runtime.Volumes)+
+			len(component.Definition.Inputs)+len(component.Definition.Outputs),
 	)
 	for _, bind := range component.Runtime.Binds {
 		mounts = append(mounts, engine.Mount{
@@ -476,6 +482,26 @@ func componentMounts(
 			Source:   volumeName(system, component.Name, volume.Name),
 			Target:   volume.Target,
 			ReadOnly: volume.ReadOnly,
+		})
+	}
+	for _, endpoint := range component.Definition.Inputs {
+		mounts = append(mounts, engine.Mount{
+			Type:     engine.MountBind,
+			ReadOnly: true,
+			Source: proxy.HostSocket(
+				runtimeDir, proxy.DirectionInput, component.Name, endpoint.Name,
+			),
+			Target: runtimecontract.InputSocket(endpoint.Name),
+		})
+	}
+	for _, endpoint := range component.Definition.Outputs {
+		mounts = append(mounts, engine.Mount{
+			Type:     engine.MountBind,
+			ReadOnly: true,
+			Source: proxy.HostSocket(
+				runtimeDir, proxy.DirectionOutput, component.Name, endpoint.Name,
+			),
+			Target: runtimecontract.OutputSocket(endpoint.Name),
 		})
 	}
 	sort.Slice(mounts, func(i, j int) bool {

@@ -1,16 +1,17 @@
 // Package lifecycle applies resolved component systems to a local Docker
-// engine. Component containers and interface networks have independent
-// identities, so changing one instance never implies replacing its siblings.
+// engine and coordinates their per-system proxy process.
 package lifecycle
 
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"time"
 
 	"github.com/glguida/dcomp/composition"
 	"github.com/glguida/dcomp/engine"
+	"github.com/glguida/dcomp/proxy"
 	"github.com/glguida/dcomp/state"
 )
 
@@ -20,6 +21,7 @@ const (
 	kindRestart = "restart"
 
 	phaseNetworks = "networks"
+	phaseProxy    = "proxy"
 	phaseRetire   = "retire"
 	phaseCreate   = "create"
 	phaseAttach   = "attach"
@@ -33,7 +35,11 @@ const (
 
 type Controller struct {
 	Engine engine.Engine
+	Proxy  proxy.Manager
 	State  state.Store
+	// RuntimeRoot contains one directory per running system. It is host-local
+	// transient state, separate from the durable lifecycle State root.
+	RuntimeRoot string
 
 	RequestTimeout time.Duration
 	StopTimeout    time.Duration
@@ -61,8 +67,15 @@ func (controller *Controller) validate() error {
 	if controller.Engine == nil {
 		return fmt.Errorf("Docker engine is not configured")
 	}
+	if controller.Proxy == nil {
+		return fmt.Errorf("DComp proxy manager is not configured")
+	}
 	if controller.State.Root == "" {
 		return fmt.Errorf("state root is not configured")
+	}
+	if !filepath.IsAbs(controller.RuntimeRoot) ||
+		filepath.Clean(controller.RuntimeRoot) != controller.RuntimeRoot {
+		return fmt.Errorf("proxy runtime root is not an absolute clean path")
 	}
 	return nil
 }
@@ -106,7 +119,8 @@ func (controller *Controller) Up(
 	} else if exists {
 		if pending.Kind == kindApply &&
 			pending.Phase != phaseAbort &&
-			pending.Target.Digest == resolved.Digest {
+			pending.Target.Digest == resolved.Digest &&
+			pending.RuntimeRoot == controller.RuntimeRoot {
 			controller.report("resuming interrupted apply for %s", resolved.Name)
 			return controller.execute(ctx, &pending)
 		}
@@ -150,6 +164,7 @@ func (controller *Controller) applyResolved(
 		phaseRetire,
 		resolved,
 		previousPointer,
+		controller.RuntimeRoot,
 	)
 	if err != nil {
 		return err
@@ -266,12 +281,14 @@ func (controller *Controller) Down(ctx context.Context, name string) error {
 		phaseDown,
 		desired.Spec,
 		&desired,
+		desired.RuntimeRoot,
 	)
 	if err != nil {
 		return err
 	}
 	operation.Networks = cloneResources(desired.Networks)
 	operation.Containers = cloneResources(desired.Containers)
+	operation.Proxy = cloneProxy(desired.Proxy)
 	if err := controller.State.WriteOperation(name, operation); err != nil {
 		return err
 	}
@@ -317,12 +334,14 @@ func (controller *Controller) Restart(
 		phaseRestart,
 		desired.Spec,
 		&desired,
+		desired.RuntimeRoot,
 	)
 	if err != nil {
 		return err
 	}
 	operation.Networks = cloneResources(desired.Networks)
 	operation.Containers = cloneResources(desired.Containers)
+	operation.Proxy = cloneProxy(desired.Proxy)
 	operation.Components = selected
 	if err := controller.State.WriteOperation(name, operation); err != nil {
 		return err
@@ -496,6 +515,14 @@ func cloneResources(input map[string]state.Resource) map[string]state.Resource {
 		output[key] = value
 	}
 	return output
+}
+
+func cloneProxy(input *proxy.Process) *proxy.Process {
+	if input == nil {
+		return nil
+	}
+	copy := *input
+	return &copy
 }
 
 func pendingError(operation state.Operation) error {

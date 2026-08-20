@@ -2,8 +2,8 @@ system demo
 
 component echo echo
 component uppercase uppercase
-
-publish uppercase tcp 127.0.0.1 50052 50051
-egress uppercase
+component caller caller
 
 link uppercase.upstream echo.echo
+args caller --wait
+link caller.upstream uppercase.echo

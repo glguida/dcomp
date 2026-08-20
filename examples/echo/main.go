@@ -23,7 +23,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	server, err := component.NewServer()
+	server, err := component.NewServer(component.WithOutput("echo"))
 	if err != nil {
 		log.Fatal(err)
 	}

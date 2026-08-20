@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/glguida/dcomp/engine"
+	"github.com/glguida/dcomp/proxy"
 	"github.com/glguida/dcomp/state"
 )
 
@@ -35,6 +36,30 @@ type fakeLogEngine struct {
 	logErrors    map[string]error
 	logBehaviors map[string]logBehavior
 	activeLogs   int
+}
+
+type proxyLogManager struct {
+	proxy.Manager
+	lines []proxy.LogLine
+	calls int
+}
+
+func (manager *proxyLogManager) Logs(
+	ctx context.Context,
+	_ proxy.Process,
+	_ bool,
+	emit func(proxy.LogLine) error,
+) error {
+	manager.calls++
+	for _, line := range manager.lines {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := emit(line); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func newFakeLogEngine(fake *fakeEngine) *fakeLogEngine {
@@ -233,6 +258,50 @@ func TestLogsFiltersExactRecordedComponentNames(t *testing.T) {
 		t.Fatalf("filtered records = %#v, want %#v", records, want)
 	}
 	requireLogCalls(t, fake, false, consumerID)
+}
+
+func TestLogsCanSelectOnlyProxy(t *testing.T) {
+	controller, fake, deployment := deployLogFixture(t)
+	timestamp := time.Date(2026, time.August, 20, 12, 0, 0, 0, time.UTC)
+	manager := &proxyLogManager{
+		Manager: controller.Proxy,
+		lines: []proxy.LogLine{{
+			Timestamp: timestamp,
+			Message:   "proxy ready",
+		}},
+	}
+	controller.Proxy = manager
+
+	var records []LogRecord
+	if err := controller.Logs(
+		context.Background(),
+		deployment.Spec.Name,
+		false,
+		func(record LogRecord) error {
+			records = append(records, record)
+			return nil
+		},
+		ProxyLogSource,
+	); err != nil {
+		t.Fatal(err)
+	}
+	want := []LogRecord{{
+		Component: ProxyLogSource,
+		Line: engine.LogLine{
+			Timestamp: timestamp,
+			Stream:    engine.LogStderr,
+			Message:   "proxy ready",
+		},
+	}}
+	if !reflect.DeepEqual(records, want) {
+		t.Fatalf("proxy records = %#v, want %#v", records, want)
+	}
+	if manager.calls != 1 {
+		t.Fatalf("proxy log calls = %d, want 1", manager.calls)
+	}
+	if calls := fake.calls(); len(calls) != 0 {
+		t.Fatalf("proxy-only logs opened component streams: %#v", calls)
+	}
 }
 
 func TestLogsRejectsUnknownOrDuplicateComponentBeforeDockerAccess(t *testing.T) {

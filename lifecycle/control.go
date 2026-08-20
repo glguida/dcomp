@@ -14,6 +14,14 @@ func (controller *Controller) supersedeOperation(
 	operation *state.Operation,
 	targetDigest string,
 ) error {
+	if operation.Kind == kindApply && applyPhaseUsesProxy(operation.Phase) {
+		if _, err := controller.recoverMissingTargetProxy(ctx, operation); err != nil {
+			return fmt.Errorf(
+				"recover interrupted apply before superseding it: %w",
+				err,
+			)
+		}
+	}
 	if err := controller.resolvePendingCreates(ctx, operation); err != nil {
 		return fmt.Errorf(
 			"resolve interrupted %s before superseding it: %w",
@@ -125,6 +133,7 @@ func (controller *Controller) executeAbort(
 		}
 		if err := verifyContainerCore(
 			operation.Target.Name,
+			runtimeDirectory(operation.RuntimeRoot, operation.Target.Name),
 			component,
 			resource,
 			actual,
@@ -197,9 +206,19 @@ func (controller *Controller) executeAbort(
 			return fmt.Errorf("remove %s during abort: %w", component.Name, err)
 		}
 	}
+	if operation.Proxy != nil &&
+		(operation.Previous == nil || !proxyProcessMatches(operation.Proxy, operation.Previous.Proxy)) {
+		if err := controller.stopRecordedProxy(ctx, operation.Proxy); err != nil {
+			return fmt.Errorf("stop proxy during abort: %w", err)
+		}
+		operation.Proxy = nil
+		if err := controller.State.WriteOperation(operation.Target.Name, *operation); err != nil {
+			return err
+		}
+	}
 
-	// A retained producer may have been attached to a new interface network
-	// before interruption. Detach only exact operation-owned networks.
+	// A retained component may have been attached to a replacement component
+	// network before interruption. Detach only exact operation-owned networks.
 	if operation.Previous != nil {
 		for _, resource := range operation.Previous.Containers {
 			actual, inspectErr := controller.inspectContainer(ctx, resource.ID)
@@ -313,6 +332,7 @@ func (controller *Controller) executeDown(
 		}
 		if err := verifyContainerCore(
 			operation.Target.Name,
+			operation.Previous.Proxy.RuntimeDir,
 			component,
 			resource,
 			actual,
@@ -340,6 +360,15 @@ func (controller *Controller) executeDown(
 		if err := controller.markComplete(operation, key); err != nil {
 			return err
 		}
+	}
+	if !operation.Completed["proxy"] {
+		if err := controller.stopRecordedProxy(ctx, operation.Proxy); err != nil {
+			return fmt.Errorf("stop proxy: %w", err)
+		}
+		if err := controller.markComplete(operation, "proxy"); err != nil {
+			return err
+		}
+		controller.report("stopped proxy for %s", operation.Target.Name)
 	}
 	plans, err := resolvedTopology(operation.Previous.Spec)
 	if err != nil {
@@ -439,6 +468,9 @@ func (controller *Controller) preflightCommittedDeployment(
 	ctx context.Context,
 	deployment state.Deployment,
 ) error {
+	if deployment.Proxy == nil {
+		return fmt.Errorf("deployment has no proxy record")
+	}
 	plans, err := resolvedTopology(deployment.Spec)
 	if err != nil {
 		return err
@@ -457,6 +489,7 @@ func (controller *Controller) preflightCommittedDeployment(
 		}
 		if err := verifyContainerCore(
 			deployment.Spec.Name,
+			deployment.Proxy.RuntimeDir,
 			component,
 			resource,
 			actual,
@@ -510,6 +543,12 @@ func (controller *Controller) preflightSelectedContainers(
 	deployment state.Deployment,
 	selected []string,
 ) error {
+	if deployment.Proxy == nil {
+		return fmt.Errorf("deployment has no proxy record")
+	}
+	if _, err := controller.inspectProxy(ctx, *deployment.Proxy); err != nil {
+		return fmt.Errorf("inspect proxy before restart: %w", err)
+	}
 	plans, err := resolvedTopology(deployment.Spec)
 	if err != nil {
 		return err
@@ -529,6 +568,7 @@ func (controller *Controller) preflightSelectedContainers(
 		}
 		if err := verifyContainerCore(
 			deployment.Spec.Name,
+			deployment.Proxy.RuntimeDir,
 			component,
 			resource,
 			actual,

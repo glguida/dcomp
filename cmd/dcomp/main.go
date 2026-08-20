@@ -17,6 +17,7 @@ import (
 	"github.com/glguida/dcomp/dockerengine"
 	"github.com/glguida/dcomp/engine"
 	"github.com/glguida/dcomp/lifecycle"
+	"github.com/glguida/dcomp/proxy"
 	"github.com/glguida/dcomp/state"
 )
 
@@ -24,18 +25,18 @@ const usageText = `dcomp runs systems of Docker components linked by protobuf in
 
 Usage:
   dcomp version [--json]
-  dcomp [--state-root DIR] check FILE
-  dcomp [--state-root DIR] up FILE
-  dcomp [--state-root DIR] ps [-a|--all] [--json] [NAME]
-  dcomp [--state-root DIR] status [--json] NAME
-  dcomp [--state-root DIR] volume [--json] SYSTEM COMPONENT LOGICAL
-  dcomp [--state-root DIR] logs [-f|--follow] NAME [COMPONENT...]
-  dcomp [--state-root DIR] attach [--ready-fd FD] SYSTEM COMPONENT
-  dcomp [--state-root DIR] restart NAME [COMPONENT...]
-  dcomp [--state-root DIR] down NAME
-  dcomp [--state-root DIR] resume NAME
-  dcomp [--state-root DIR] abort NAME
-  dcomp [--state-root DIR] inspect-image IMAGE
+  dcomp [--state-root DIR] [--runtime-root DIR] check FILE
+  dcomp [--state-root DIR] [--runtime-root DIR] up FILE
+  dcomp [--state-root DIR] [--runtime-root DIR] ps [-a|--all] [--json] [NAME]
+  dcomp [--state-root DIR] [--runtime-root DIR] status [--json] NAME
+  dcomp [--state-root DIR] [--runtime-root DIR] volume [--json] SYSTEM COMPONENT LOGICAL
+  dcomp [--state-root DIR] [--runtime-root DIR] logs [-f|--follow] NAME [COMPONENT...]
+  dcomp [--state-root DIR] [--runtime-root DIR] attach [--ready-fd FD] SYSTEM COMPONENT
+  dcomp [--state-root DIR] [--runtime-root DIR] restart NAME [COMPONENT...]
+  dcomp [--state-root DIR] [--runtime-root DIR] down NAME
+  dcomp [--state-root DIR] [--runtime-root DIR] resume NAME
+  dcomp [--state-root DIR] [--runtime-root DIR] abort NAME
+  dcomp [--state-root DIR] [--runtime-root DIR] inspect-image IMAGE
 
 Operations interrupted by Ctrl-C or host failure remain recorded. Use up FILE
 to resume the same resolved target or supersede it with a different one. Resume
@@ -51,6 +52,7 @@ func run(arguments []string) int {
 	flags := flag.NewFlagSet("dcomp", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	stateRoot := flags.String("state-root", "", "durable dcomp state directory")
+	runtimeRoot := flags.String("runtime-root", "", "transient per-system proxy directory")
 	flags.Usage = func() { fmt.Fprint(flags.Output(), usageText) }
 	if err := flags.Parse(arguments); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -93,6 +95,19 @@ func run(arguments []string) int {
 		fmt.Fprintln(os.Stderr, "error: --state-root must be an absolute path")
 		return 2
 	}
+	proxyRoot := *runtimeRoot
+	if proxyRoot == "" {
+		var err error
+		proxyRoot, err = proxy.DefaultRuntimeRoot()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			return 1
+		}
+	}
+	if !filepath.IsAbs(proxyRoot) || filepath.Clean(proxyRoot) != proxyRoot {
+		fmt.Fprintln(os.Stderr, "error: --runtime-root must be an absolute clean path")
+		return 2
+	}
 
 	docker, err := dockerengine.NewFromEnvironment()
 	if err != nil {
@@ -100,9 +115,11 @@ func run(arguments []string) int {
 		return 1
 	}
 	controller := lifecycle.Controller{
-		Engine: docker,
-		State:  state.Store{Root: root},
-		Report: func(message string) { fmt.Fprintln(os.Stderr, message) },
+		Engine:      docker,
+		Proxy:       &proxy.ProcessManager{},
+		State:       state.Store{Root: root},
+		RuntimeRoot: proxyRoot,
+		Report:      func(message string) { fmt.Fprintln(os.Stderr, message) },
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -336,6 +353,21 @@ func printStatus(status lifecycle.Status) {
 		fmt.Printf("%s desired=running digest=%s\n", status.Name, status.Digest)
 	default:
 		fmt.Printf("%s desired=absent\n", status.Name)
+	}
+	if status.Proxy.InstanceID != "" || status.Proxy.Problem != "" {
+		state := "not-ready"
+		if status.Proxy.Ready {
+			state = "ready"
+		}
+		fmt.Printf(
+			"PROXY\t%s\tpid=%d\tinputs=%d\toutputs=%d\tconnections=%d\t%s\n",
+			state,
+			status.Proxy.PID,
+			status.Proxy.Inputs,
+			status.Proxy.Outputs,
+			status.Proxy.ActiveConnections,
+			strings.ReplaceAll(status.Proxy.Problem, "\n", " "),
+		)
 	}
 	if len(status.Networks) != 0 {
 		fmt.Println("NETWORK\tPOLICY\tID\tPROBLEM")

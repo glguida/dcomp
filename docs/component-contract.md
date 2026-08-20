@@ -1,290 +1,205 @@
 # Component contract
 
-A DComp component consists of:
+This document defines the DComp 0.2 image and process contract. It is
+wire-incompatible with 0.1.x.
 
-1. an independently built OCI image; and
-2. a project-owned `component.dcomp` describing the image and its nominal
-   interface endpoints.
+## Descriptor
 
-DComp applies only the explicit runtime policy declared by `system.dcomp` and
-supplies direct input targets. It defines no application message envelope and
-does not inspect request or response bodies.
-
-Every component runs without a TTY and with its global standard input kept
-open. `dcomp attach SYSTEM COMPONENT` can therefore connect a controller to
-the verified running component's fd 0, 1, and 2 while keeping stdout and stderr
-distinct. Standard I/O is a generic component runtime facility; its bytes have
-no DComp-defined application meaning. Caller stdin EOF stops input forwarding
-without ending output; cancellation or process termination ends the attachment.
-
-## `component.dcomp`
-
-The format is line-oriented:
+Each component directory contains `component.dcomp`:
 
 ```text
-docker IMAGE
-input INTERFACE_NAME LOCAL_NAME
-output INTERFACE_NAME LOCAL_NAME
+docker registry.example/document-filter:1.4
+input example.document.v1.Documents documents
+output example.document.v1.Documents filtered
 ```
 
-Blank lines and text after `#` are ignored. `docker` appears exactly once.
-`input` and `output` may each appear zero or more times.
-
-System, instance, and endpoint names begin with a lowercase ASCII letter and
-contain only lowercase letters, digits, and hyphens, up to 63 characters.
-
-Example:
+The grammar is line-oriented. Blank lines and text after `#` are ignored.
+There is one `docker IMAGE` directive followed by any number of input/output
+declarations:
 
 ```text
-docker example/transform:1
-input example.echo.v1.Echo upstream
-input example.audit.v1.Audit audit
-output example.transform.v1.Transform transform
+input PROTOBUF_SERVICE LOCAL_NAME
+output PROTOBUF_SERVICE LOCAL_NAME
 ```
 
-`INTERFACE_NAME` is a dotted nominal identifier, such as
-`example.echo.v1.Echo`. Its syntax accommodates fully qualified protobuf
-service names, but DComp treats it only as an opaque compatibility name.
-`LOCAL_NAME` identifies the endpoint within that input or output list. Input
-names and output names are separate namespaces.
+Local names begin with a lowercase letter and contain lowercase letters,
+digits, or hyphens. Input and output names are separate namespaces. The service
+identifier is nominal: linked endpoints must use the same identifier, but
+DComp does not load descriptors or constrain the stream protocol.
 
-The descriptor names an image that has already been built or otherwise made
-available to the local Docker Engine. DComp does not execute `docker build`,
-pull images, or infer a Dockerfile or build context.
+## Runtime addresses
 
-Application schemas, including any `.proto` files, remain normal project
-source. DComp stores no central interface catalogue, loads no schema
-definitions, and generates no application bindings.
-
-## Generated interface bindings
-
-Components must use the client and server interfaces generated from the
-interface definition. They must not reimplement the wire contract.
-
-## System links
-
-The system format is also line-oriented:
+For every declared input DComp injects and mounts:
 
 ```text
-system NAME
-component INSTANCE PATH
-bind INSTANCE SOURCE TARGET ro|rw
-volume INSTANCE LOGICAL_NAME TARGET ro|rw
-args INSTANCE ARG...
-publish INSTANCE tcp|udp HOST_IP HOST_PORT CONTAINER_PORT
-egress INSTANCE
-link INSTANCE.INPUT INSTANCE.OUTPUT
+DCOMP_IN_DOCUMENTS=unix:///run/dcomp/in/documents
+/run/dcomp/in/documents
 ```
 
-It uses the same blank-line and `#` comment rules.
-
-A `system.dcomp` creates instances of components and binds endpoint references:
+For every declared output:
 
 ```text
-system demo
-component backend components/backend
-component frontend components/frontend
-link frontend.upstream backend.echo
+DCOMP_OUT_FILTERED=unix:///run/dcomp/out/filtered
+/run/dcomp/out/filtered
 ```
 
-The left reference must name a declared input. The right reference must name a
-declared output. Their interface names must match exactly. This is nominal
-matching: DComp does not compare schemas, descriptor sets, or wire formats.
+The environment spelling is deterministic:
 
-Every input must be linked exactly once. Outputs may fan out. Links may form
-cycles because they configure addresses, not lifecycle dependencies.
-
-A component path may name either a directory containing `component.dcomp` or
-the file itself. Relative paths are resolved from the system file; absolute
-paths are accepted.
-
-## Instance runtime policy
-
-Runtime directives must appear after the named `component` declaration. They
-are optional; the defaults are no mounts, inherited image command arguments, no
-published ports, and no external egress.
-
-`bind` mounts an existing host path. A relative source is resolved from
-`system.dcomp`; DComp resolves symlinks and stores a canonical absolute path.
-The target must be a clean absolute container path. The access mode is always
-explicit:
-
-```text
-bind frontend ./frontend.conf /etc/frontend.conf ro
-```
-
-`volume` creates or reuses component-owned persistent storage:
-
-```text
-volume frontend state /var/lib/frontend rw
-```
-
-The logical name uses the same lowercase local-name syntax as components.
-DComp derives and verifies the Docker volume name. It does not adopt an
-arbitrary existing volume, and it does not delete declared volumes during
-replacement, `down`, or `abort`.
-
-Host tooling can request the physical Docker name without duplicating DComp's
-naming rules:
-
-```sh
-dcomp volume --json example frontend state
-```
-
-The lookup is read-only. It succeeds only when the exact local volume exists,
-the selected state root is bound to the current Docker engine, and all DComp
-ownership, system, component, and logical-name labels match. It also succeeds
-after `dcomp down example`, because persistent volumes intentionally outlive
-the deployment.
-
-`args` replaces the image's command argument array without changing its
-entrypoint:
-
-```text
-args frontend serve --mode production
-```
-
-Arguments are ordinary whitespace-delimited tokens. There is no quoting,
-interpolation, or shell evaluation.
-
-`publish` binds one TCP or UDP container port on an explicit host IP:
-
-```text
-publish frontend tcp 127.0.0.1 8080 8080
-egress frontend
-```
-
-IPs must be literals. Container ports must be in `1..65535`. A host port in
-`1..65535` requests that exact port; host port `0` asks Docker to allocate a
-free port. The effective allocation is reported by `dcomp status --json`.
-Docker may choose a different allocation after a component restart, so callers
-must treat that status as the current endpoint rather than persisted identity.
-Duplicate fixed host protocol/IP/port tuples are rejected. Within one address family, an
-unspecified-address binding (`0.0.0.0` or `::`) also conflicts with every
-specific address using the same protocol and host port. IPv4 and IPv6 are
-separate; any remaining daemon-confirmed bind failure leaves the operation
-available for `resume` or `abort`.
-
-`egress INSTANCE` gives only that component an externally routed base network.
-Without it, all of the component's networks are internal. Docker does not
-realize published ports on an internal-only bridge, so an instance using
-`publish` must also declare `egress`; DComp does not grant that route
-implicitly.
-
-Bind and volume targets may not be equal, nested, or otherwise overlap within
-one component. DComp supplies no arbitrary Docker option, environment,
-entrypoint, privilege, capability, device, or mount-propagation escape hatch.
-Every component is launched with `no-new-privileges`, `NET_RAW` dropped, and a
-2048-process PIDs limit.
-
-## Required runtime behavior
-
-The image entrypoint must:
-
-- if it declares outputs, listen on TCP `0.0.0.0:50051` and serve every
-  declared output interface on that listener;
-- read linked input addresses from `DCOMP_LINK_*`;
-- satisfy its image's meaningful OCI `HEALTHCHECK`; and
-- shut down cleanly when Docker delivers its stop signal.
-
-All declared outputs share port `50051`. Dispatch or multiplexing is the
-component's application-protocol responsibility. A sink or workload component
-may have inputs and no outputs; its health check remains the readiness
-contract.
-
-The component must not assume a fixed IP address. Docker DNS and the supplied
-link addresses are the stable addressing interface.
-
-## Link injection
-
-For this link:
-
-```text
-link frontend.model-store backend.models
-```
-
-DComp injects into `frontend`:
-
-```text
-DCOMP_LINK_MODEL_STORE=dns:///backend:50051
-```
-
-Environment variable names are derived from input names:
-
-1. prefix with `DCOMP_LINK_`;
-2. convert letters to uppercase; and
+1. use `DCOMP_IN_` or `DCOMP_OUT_`;
+2. uppercase the local endpoint name; and
 3. replace `-` with `_`.
 
-The value is an injected address in `dns:///COMPONENT:50051` form. DComp does
-not interpret it after injection. A gRPC client can use it directly; another
-protocol implementation may parse it itself. The component selects its own
-client implementation, deadlines, retry policy, and application behavior.
+Only the component's own endpoint socket files are bind-mounted. These mounts
+are read-only at the filesystem layer while the socket streams remain
+bidirectional. The component does not receive the host runtime directory or
+sockets belonging to peers.
 
-## Health
+The component must call `connect()` for every interface it uses. It must never
+call `bind()` or `listen()` on these paths. The proxy is the only listener and
+the supplied URI is the only stable endpoint identity.
 
-The image must define a meaningful Docker `HEALTHCHECK` for the component's
-actual readiness. DComp rejects images without a health-check declaration and
-observes the health state reported by Docker. It does not invoke or prescribe
-an application-level health API.
+Inputs and outputs are symmetric at the transport layer. An input component
+normally acts as an application client on its connected stream. An output
+component normally acts as an application server on its connected stream. A
+server framework can use a listener adapter that yields connections made to
+the proxy rather than binding a local address.
 
-The probe must use a bounded deadline and return non-zero when the component
-cannot serve its declared outputs. The exact probe and protocol belong to the
-component.
+## Connection behavior
 
-## Optional Go/gRPC convention
+The proxy pairs one input connection with one connection from the linked
+output. It forwards an opaque, ordered byte stream in both directions.
 
-The `component` Go package provides a convenient implementation based on
-protobuf/gRPC. Its server multiplexes generated gRPC services on port `50051`,
-serves standard `grpc.health.v1.Health`, enables server reflection, reads link
-addresses, and coordinates bounded shutdown.
+Components should tolerate connection refusal during startup, EOF when a peer
+restarts, and reconnect with bounded backoff. A producer output may receive
+several independent connections when it fans out or when clients reconnect.
+It must not assume that one output has exactly one lifetime connection.
 
-Those behaviors are conventions of the optional helper, not requirements
-enforced by DComp. DComp does not query health RPCs or reflection, load
-protobuf descriptors, compare message schemas, or inspect application
-payloads.
+DComp does not prescribe deadlines, request framing, retry semantics, or
+application-level health. Those belong to the selected protocol.
 
-## Graceful shutdown
+## Optional Go/gRPC helper
 
-The entrypoint must receive Docker's stop signal or relay it correctly. Shell
-wrappers should use `exec`.
+The `component` package validates addresses and adapts a gRPC server to the
+client-only output contract.
 
-On termination, the server:
+An input client:
 
-1. stops accepting new work;
-2. drains in-flight operations within a bounded deadline; and
-3. exits before Docker's stop timeout.
-
-An image may set `STOPSIGNAL`; DComp does not override it.
-
-## Network and filesystem constraints
-
-Every component has a private base bridge containing no peer. The bridge is
-internal unless the instance declares `egress`. Every direct input link has a
-separate internal bridge containing exactly its consumer and provider. An
-output serving several consumers is therefore attached to several isolated
-link networks; the consumers do not share a network.
-
-DComp publishes only declared host ports and mounts only declared binds and
-volumes. It never mounts the Docker socket or host-side DComp state
-automatically. An image may declare OCI `VOLUME` targets only when every target
-is exactly covered by an explicit `bind` or `volume`, preventing Docker from
-creating untracked anonymous storage.
-
-## Minimal image pattern
-
-The implementation language and base image are unrestricted:
-
-```dockerfile
-FROM example/runtime:version
-
-COPY component /usr/local/bin/component
-COPY component-healthcheck /usr/local/bin/component-healthcheck
-
-HEALTHCHECK --interval=2s --timeout=1s --retries=10 \
-  CMD ["/usr/local/bin/component-healthcheck", "127.0.0.1:50051"]
-
-ENTRYPOINT ["/usr/local/bin/component"]
+```go
+target, err := component.InputTarget("upstream")
+if err != nil {
+    log.Fatal(err)
+}
+connection, err := grpc.Dial(
+    target,
+    grpc.WithTransportCredentials(insecure.NewCredentials()),
+)
 ```
 
-No DComp interface labels are required. The corresponding
-`component.dcomp`, owned by the downstream project, is the interface contract.
+An output server:
+
+```go
+server, err := component.NewServer(component.WithOutput("filtered"))
+if err != nil {
+    log.Fatal(err)
+}
+examplev1.RegisterDocumentsServer(server, implementation)
+if err := server.Serve(ctx); err != nil {
+    log.Fatal(err)
+}
+```
+
+`Server` connects to the output Unix socket, waits for a consumer's gRPC
+preface, and presents the resulting connection to `grpc.Server`. It includes
+standard gRPC health and reflection services and performs bounded graceful
+shutdown. Multiple `WithOutput` options are supported, although every
+registered gRPC service is then available on each configured output.
+
+`ServeListener` remains available for tests and custom embedding. DComp-managed
+interface paths must still follow the client-only rule.
+
+## Image requirements
+
+The referenced image must already exist locally or be resolvable by Docker.
+DComp does not build or pull it. The image must:
+
+- contain a long-running entrypoint for a managed component;
+- declare a meaningful OCI `HEALTHCHECK`;
+- receive and act on Docker's stop signal; and
+- explicitly mount every image-declared OCI `VOLUME` through a system
+  `bind` or `volume` directive.
+
+The image may run under any UID. Interface sockets are connectable by
+non-root component users. Shell entrypoints should use `exec` so the
+application receives termination signals.
+
+The bundled health checker can validate an endpoint mount without consuming a
+proxy connection:
+
+```dockerfile
+HEALTHCHECK CMD ["/dcomp-healthcheck", "--socket", "/run/dcomp/out/filtered"]
+```
+
+Applications are encouraged to use a stronger check when they can expose one
+without binding a declared interface path. Docker reports stopped containers
+independently of health-check results.
+
+## Runtime policy
+
+System files may add bounded policy after the component declaration:
+
+```text
+bind filter ./config.json /etc/filter/config.json ro
+volume filter cache /var/lib/filter rw
+args filter serve --strict
+publish filter tcp 127.0.0.1 8080 8080
+egress filter
+```
+
+Bind sources are canonical existing host paths. Named volumes are
+system/component scoped and persist through replacement and `down`. Mount
+targets must be absolute, clean, non-overlapping, and outside `/run/dcomp`.
+
+`args` replaces image command arguments without changing the entrypoint.
+There is no shell expansion.
+
+`publish` and `egress` are for an additional, explicitly component-owned
+service. They do not expose declared DComp inputs or outputs. A published port
+requires `egress` because components otherwise use Docker network mode `none`.
+
+Every container is created with:
+
+- an init process;
+- restart policy `no`;
+- `no-new-privileges`;
+- capability `NET_RAW` dropped;
+- a 2048-process PIDs limit;
+- open, non-TTY standard input for `dcomp attach`; and
+- Docker network mode `none`, or its one dedicated bridge when `egress` is
+  declared; and
+- only typed user mounts and endpoint socket mounts.
+
+DComp supplies no arbitrary environment, entrypoint, user, capability,
+privilege, device, Docker-socket, mount-propagation, or resource-limit escape
+hatch.
+
+## Shutdown and restart
+
+On termination a component should stop accepting new work, drain outstanding
+requests within a bounded interval, and exit before Docker's stop timeout.
+
+`dcomp restart SYSTEM COMPONENT` restarts only that existing container. The
+proxy and other components keep running; output and input implementations must
+reconnect normally.
+
+## Removed 0.1 contract
+
+The following behavior is invalid in 0.2:
+
+```text
+DCOMP_LINK_UPSTREAM=dns:///provider:50051
+listen 0.0.0.0:50051
+```
+
+There are no `DCOMP_LINK_*` variables, fixed interface ports, per-link Docker
+bridges, or direct Docker-DNS application calls. Components using any of those
+assumptions must be rebuilt for 0.2.

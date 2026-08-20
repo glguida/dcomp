@@ -13,7 +13,7 @@ func TestWriteVersionJSONIsStableAndSelfDescribing(t *testing.T) {
 	if err := writeVersion(&output, true); err != nil {
 		t.Fatal(err)
 	}
-	const want = "{\"version\":\"0.1.2\",\"api_version\":1}\n"
+	const want = "{\"version\":\"0.2.0\",\"api_version\":2}\n"
 	if got := output.String(); got != want {
 		t.Fatalf("version JSON = %q, want %q", got, want)
 	}
@@ -22,6 +22,10 @@ func TestWriteVersionJSONIsStableAndSelfDescribing(t *testing.T) {
 func TestWriteStatusJSONReportsEffectivePublishedPorts(t *testing.T) {
 	status := lifecycle.Status{
 		Name: "demo", Desired: true, Digest: "sha256:system",
+		Proxy: lifecycle.ProxyStatus{
+			InstanceID: "proxy-id", Digest: "sha256:proxy", PID: 123,
+			Ready: true, Inputs: 1, Outputs: 1, ActiveConnections: 2,
+		},
 		Networks: []lifecycle.NetworkStatus{{
 			Key: "component/service", ID: "network-id", Internal: false,
 		}},
@@ -39,9 +43,12 @@ func TestWriteStatusJSONReportsEffectivePublishedPorts(t *testing.T) {
 	if err := writeStatusJSON(&output, status); err != nil {
 		t.Fatal(err)
 	}
-	const want = "{\"api_version\":1,\"name\":\"demo\",\"desired\":true," +
+	const want = "{\"api_version\":2,\"name\":\"demo\",\"desired\":true," +
 		"\"operational\":true,\"digest\":\"sha256:system\",\"operation\":\"\"," +
-		"\"phase\":\"\",\"networks\":[{\"key\":\"component/service\"," +
+		"\"phase\":\"\",\"proxy\":{\"instance_id\":\"proxy-id\"," +
+		"\"digest\":\"sha256:proxy\",\"pid\":123,\"ready\":true," +
+		"\"inputs\":1,\"outputs\":1,\"active_connections\":2,\"problem\":\"\"}," +
+		"\"networks\":[{\"key\":\"component/service\"," +
 		"\"id\":\"network-id\",\"internal\":false,\"problem\":\"\"}]," +
 		"\"components\":[{\"name\":\"service\",\"container_id\":\"container-id\"," +
 		"\"status\":\"running\",\"health\":\"healthy\",\"exit_code\":0," +
@@ -70,7 +77,7 @@ func TestWriteProcessesJSONIsStableAndSelfDescribing(t *testing.T) {
 	if err := writeProcessesJSON(&output, processes); err != nil {
 		t.Fatal(err)
 	}
-	const want = "{\"api_version\":1,\"components\":[{" +
+	const want = "{\"api_version\":2,\"components\":[{" +
 		"\"system\":\"demo\",\"component\":\"service\"," +
 		"\"container_id\":\"container-id\",\"status\":\"running\"," +
 		"\"health\":\"unhealthy\",\"exit_code\":0," +
@@ -88,9 +95,11 @@ func TestWriteStatusJSONUsesArraysForAbsentSystem(t *testing.T) {
 	if err := writeStatusJSON(&output, lifecycle.Status{Name: "absent"}); err != nil {
 		t.Fatal(err)
 	}
-	const want = "{\"api_version\":1,\"name\":\"absent\",\"desired\":false," +
+	const want = "{\"api_version\":2,\"name\":\"absent\",\"desired\":false," +
 		"\"operational\":false,\"digest\":\"\",\"operation\":\"\",\"phase\":\"\"," +
-		"\"networks\":[],\"components\":[]}\n"
+		"\"proxy\":{\"instance_id\":\"\",\"digest\":\"\",\"pid\":0," +
+		"\"ready\":false,\"inputs\":0,\"outputs\":0,\"active_connections\":0," +
+		"\"problem\":\"\"},\"networks\":[],\"components\":[]}\n"
 	if got := output.String(); got != want {
 		t.Fatalf("absent status JSON = %q, want %q", got, want)
 	}
@@ -104,7 +113,7 @@ func TestWriteVolumeJSONIsStableAndSelfDescribing(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	const want = "{\"api_version\":1,\"system\":\"demo\"," +
+	const want = "{\"api_version\":2,\"system\":\"demo\"," +
 		"\"component\":\"worker\",\"logical_name\":\"state\"," +
 		"\"name\":\"dcomp.demo.volume.worker.state\"}\n"
 	if got := output.String(); got != want {

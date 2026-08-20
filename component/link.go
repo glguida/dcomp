@@ -1,43 +1,61 @@
-// Package component contains optional Go helpers for DComp components that use
-// gRPC. DComp itself treats application protocols and payloads as opaque.
+// Package component contains optional Go helpers for DComp components. DComp
+// treats application protocols and payloads as opaque.
 package component
 
 import (
 	"fmt"
+	"net/url"
 	"os"
-	"regexp"
+	"path/filepath"
 	"strings"
+
+	"github.com/glguida/dcomp/internal/runtimecontract"
 )
 
-const linkPrefix = "DCOMP_LINK_"
-
-var slotPattern = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
-
-// LinkEnv returns the environment variable used for a required interface.
-//
-// Slot names are deliberately restricted so that every slot has exactly one
-// portable environment-variable spelling. Hyphens become underscores.
-func LinkEnv(slot string) (string, error) {
-	if !slotPattern.MatchString(slot) {
-		return "", fmt.Errorf("invalid dcomp link slot %q: use lower-case letters, digits, and hyphens", slot)
-	}
-	return linkPrefix + strings.ToUpper(strings.ReplaceAll(slot, "-", "_")), nil
+func InputEnv(slot string) (string, error) {
+	return endpointEnv(runtimecontract.InputEnvironment, slot)
 }
 
-// LinkTarget returns the address wired to slot by the DComp runtime.
-//
-// A typical value is "dns:///echo:50051". The value is opaque to dcomp and is
-// returned unchanged. A gRPC client can use the value directly; another
-// protocol implementation may interpret the injected address itself.
-func LinkTarget(slot string) (string, error) {
-	name, err := LinkEnv(slot)
+func OutputEnv(slot string) (string, error) {
+	return endpointEnv(runtimecontract.OutputEnvironment, slot)
+}
+
+func InputTarget(slot string) (string, error) {
+	return endpointTarget(runtimecontract.InputEnvironment, "input", slot)
+}
+
+func OutputTarget(slot string) (string, error) {
+	return endpointTarget(runtimecontract.OutputEnvironment, "output", slot)
+}
+
+func endpointEnv(environment func(string) string, slot string) (string, error) {
+	if !runtimecontract.ValidEndpointName(slot) {
+		return "", fmt.Errorf("invalid dcomp interface name %q: use lower-case letters, digits, and hyphens", slot)
+	}
+	return environment(slot), nil
+}
+
+func endpointTarget(environment func(string) string, direction, slot string) (string, error) {
+	name, err := endpointEnv(environment, slot)
 	if err != nil {
 		return "", err
 	}
 	target, ok := os.LookupEnv(name)
 	target = strings.TrimSpace(target)
 	if !ok || target == "" {
-		return "", fmt.Errorf("required dcomp link %q is not configured (%s is empty)", slot, name)
+		return "", fmt.Errorf("required dcomp %s %q is not configured (%s is empty)", direction, slot, name)
+	}
+	parsed, err := url.Parse(target)
+	if err != nil || parsed.Scheme != "unix" || !filepath.IsAbs(parsed.Path) || parsed.Host != "" {
+		return "", fmt.Errorf("%s must contain an absolute unix:/// path", name)
 	}
 	return target, nil
+}
+
+func unixPath(target string) (string, error) {
+	parsed, err := url.Parse(target)
+	if err != nil || parsed.Scheme != "unix" || !filepath.IsAbs(parsed.Path) || parsed.Host != "" {
+		return "", fmt.Errorf("invalid DComp Unix address %q", target)
+	}
+	return parsed.Path, nil
 }

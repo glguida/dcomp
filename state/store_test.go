@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/glguida/dcomp/composition"
+	"github.com/glguida/dcomp/proxy"
 )
 
 func TestSystemsListsRecordedNamesWithoutCreatingState(t *testing.T) {
@@ -106,8 +107,16 @@ func TestEngineBindingIsWriteOnce(t *testing.T) {
 
 func TestAtomicStateRoundTrip(t *testing.T) {
 	store := Store{Root: t.TempDir()}
+	runtimeRoot := t.TempDir()
 	deployment := Deployment{
-		Spec: composition.ResolvedSpec{Name: "demo", Digest: "sha256:test"},
+		Spec:        composition.ResolvedSpec{Name: "demo", Digest: "sha256:test"},
+		RuntimeRoot: runtimeRoot,
+		Proxy: &proxy.Process{
+			InstanceID: "proxy-instance", Digest: "sha256:proxy", PID: 100,
+			RuntimeDir: filepath.Join(runtimeRoot, "demo"),
+			Control:    filepath.Join(runtimeRoot, "demo", proxy.ControlSocketName),
+			Log:        filepath.Join(runtimeRoot, "demo", proxy.LogFileName),
+		},
 		Networks: map[string]Resource{
 			"component:echo": {
 				ID:   "network-id",
@@ -134,6 +143,27 @@ func TestAtomicStateRoundTrip(t *testing.T) {
 	}
 	if mode.Mode().Perm() != 0600 {
 		t.Fatalf("desired.json mode = %o", mode.Mode().Perm())
+	}
+}
+
+func TestWriteDesiredRejectsProxyOutsideRuntimeRoot(t *testing.T) {
+	store := Store{Root: t.TempDir()}
+	runtimeRoot := t.TempDir()
+	runtimeDir := filepath.Join(runtimeRoot, "other-system")
+	deployment := Deployment{
+		Spec:        composition.ResolvedSpec{Name: "demo", Digest: "sha256:test"},
+		RuntimeRoot: runtimeRoot,
+		Proxy: &proxy.Process{
+			InstanceID: "proxy-instance", Digest: "sha256:proxy", PID: 100,
+			RuntimeDir: runtimeDir,
+			Control:    proxy.ControlSocket(runtimeDir),
+			Log:        filepath.Join(runtimeDir, proxy.LogFileName),
+		},
+		Networks: map[string]Resource{}, Containers: map[string]Resource{},
+	}
+	if err := store.WriteDesired("demo", deployment); err == nil ||
+		!strings.Contains(err.Error(), "outside its runtime root") {
+		t.Fatalf("WriteDesired error = %v", err)
 	}
 }
 
@@ -186,11 +216,28 @@ func TestRejectsStateStoredUnderAnotherComposition(t *testing.T) {
 		t.Fatal("cross-composition desired state was written")
 	}
 
-	operation, err := NewOperation("apply", "network", deployment.Spec, nil)
+	operation, err := NewOperation("apply", "network", deployment.Spec, nil, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := store.WriteOperation("demo", operation); err == nil {
 		t.Fatal("cross-composition operation state was written")
+	}
+}
+
+func TestNewOperationRequiresValidRuntimeRoot(t *testing.T) {
+	target := composition.ResolvedSpec{Name: "demo", Digest: "sha256:test"}
+	for _, root := range []string{"", "relative", "/tmp/../tmp"} {
+		if _, err := NewOperation("apply", "network", target, nil, root); err == nil {
+			t.Fatalf("NewOperation accepted invalid runtime root %q", root)
+		}
+	}
+	root := t.TempDir()
+	operation, err := NewOperation("apply", "network", target, nil, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if operation.RuntimeRoot != root {
+		t.Fatalf("runtime root = %q, want %q", operation.RuntimeRoot, root)
 	}
 }

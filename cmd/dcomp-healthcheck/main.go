@@ -16,8 +16,6 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
-const defaultTarget = "127.0.0.1:50051"
-
 func check(ctx context.Context, target, service string) error {
 	connection, err := grpc.DialContext(
 		ctx,
@@ -46,7 +44,8 @@ func check(ctx context.Context, target, service string) error {
 func run(args []string, stderr io.Writer) int {
 	flags := flag.NewFlagSet("dcomp-healthcheck", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	target := flags.String("target", defaultTarget, "gRPC target")
+	target := flags.String("target", "", "explicit gRPC target")
+	socket := flags.String("socket", "", "require an orchestrator-mounted Unix socket")
 	service := flags.String("service", "", "fully-qualified service name")
 	timeout := flags.Duration("timeout", 2*time.Second, "total connection and RPC timeout")
 	if err := flags.Parse(args); err != nil {
@@ -59,6 +58,22 @@ func run(args []string, stderr io.Writer) int {
 	if *timeout <= 0 {
 		fmt.Fprintln(stderr, "dcomp-healthcheck: timeout must be positive")
 		return 2
+	}
+	if (*target == "") == (*socket == "") {
+		fmt.Fprintln(stderr, "dcomp-healthcheck: exactly one of --target or --socket is required")
+		return 2
+	}
+	if *socket != "" {
+		info, err := os.Stat(*socket)
+		if err != nil {
+			fmt.Fprintf(stderr, "dcomp-healthcheck: inspect socket: %v\n", err)
+			return 1
+		}
+		if info.Mode()&os.ModeSocket == 0 {
+			fmt.Fprintf(stderr, "dcomp-healthcheck: %s is not a Unix socket\n", *socket)
+			return 1
+		}
+		return 0
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)

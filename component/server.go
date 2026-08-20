@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"strings"
 	"sync"
 	"time"
 
@@ -16,28 +15,31 @@ import (
 )
 
 const (
-	// DefaultListenAddress is reachable only according to the container's
-	// Docker-network attachments; dcomp never publishes it on the host.
-	DefaultListenAddress = "0.0.0.0:50051"
-	DefaultGraceTimeout  = 8 * time.Second
+	DefaultGraceTimeout = 8 * time.Second
 )
 
 type serverConfig struct {
-	listenAddress string
-	graceTimeout  time.Duration
-	grpcOptions   []grpc.ServerOption
+	outputs      []string
+	graceTimeout time.Duration
+	grpcOptions  []grpc.ServerOption
 }
 
 // Option configures a Server.
 type Option func(*serverConfig) error
 
-// WithListenAddress changes the component's listen address.
-func WithListenAddress(address string) Option {
+// WithOutput adds one declared output endpoint to Serve. The component dials
+// the proxy-provided Unix socket; it never binds or listens on that path.
+func WithOutput(name string) Option {
 	return func(config *serverConfig) error {
-		if strings.TrimSpace(address) == "" {
-			return errors.New("listen address must not be empty")
+		if _, err := OutputEnv(name); err != nil {
+			return err
 		}
-		config.listenAddress = address
+		for _, existing := range config.outputs {
+			if existing == name {
+				return fmt.Errorf("output %q is configured more than once", name)
+			}
+		}
+		config.outputs = append(config.outputs, name)
 		return nil
 	}
 }
@@ -67,7 +69,7 @@ func WithGRPCOptions(options ...grpc.ServerOption) Option {
 type Server struct {
 	grpc         *grpc.Server
 	health       *health.Server
-	listen       string
+	outputs      []string
 	graceTimeout time.Duration
 
 	mu       sync.Mutex
@@ -79,8 +81,7 @@ type Server struct {
 // the returned value using their generated Register...Server function.
 func NewServer(options ...Option) (*Server, error) {
 	config := serverConfig{
-		listenAddress: DefaultListenAddress,
-		graceTimeout:  DefaultGraceTimeout,
+		graceTimeout: DefaultGraceTimeout,
 	}
 	for _, option := range options {
 		if option == nil {
@@ -100,7 +101,7 @@ func NewServer(options ...Option) (*Server, error) {
 	return &Server{
 		grpc:         grpcServer,
 		health:       healthServer,
-		listen:       config.listenAddress,
+		outputs:      append([]string(nil), config.outputs...),
 		graceTimeout: config.graceTimeout,
 		services:     make(map[string]struct{}),
 	}, nil
@@ -119,12 +120,32 @@ func (server *Server) RegisterService(description *grpc.ServiceDesc, implementat
 	server.health.SetServingStatus(description.ServiceName, healthpb.HealthCheckResponse_NOT_SERVING)
 }
 
-// Serve listens on the configured address and blocks until ctx is cancelled,
-// the server fails, or shutdown completes.
+// Serve connects to every configured output socket and blocks until ctx is
+// cancelled, the server fails, or shutdown completes.
 func (server *Server) Serve(ctx context.Context) error {
-	listener, err := net.Listen("tcp", server.listen)
-	if err != nil {
-		return fmt.Errorf("listen on %s: %w", server.listen, err)
+	if ctx == nil {
+		return errors.New("nil serve context")
+	}
+	if len(server.outputs) == 0 {
+		return errors.New("dcomp server has no output; configure WithOutput")
+	}
+	listeners := make([]net.Listener, 0, len(server.outputs))
+	for _, output := range server.outputs {
+		target, err := OutputTarget(output)
+		if err != nil {
+			closeListeners(listeners)
+			return err
+		}
+		path, err := unixPath(target)
+		if err != nil {
+			closeListeners(listeners)
+			return err
+		}
+		listeners = append(listeners, newDialListener(ctx, path))
+	}
+	listener := net.Listener(listeners[0])
+	if len(listeners) > 1 {
+		listener = newMultiListener(ctx, listeners)
 	}
 	return server.ServeListener(ctx, listener)
 }
@@ -192,8 +213,168 @@ func (server *Server) ServeListener(ctx context.Context, listener net.Listener) 
 	if serveErr == nil {
 		serveErr = <-serveResult
 	}
-	if serveErr != nil && !errors.Is(serveErr, grpc.ErrServerStopped) {
+	if serveErr != nil &&
+		!errors.Is(serveErr, grpc.ErrServerStopped) &&
+		!(ctx.Err() != nil && errors.Is(serveErr, net.ErrClosed)) {
 		return fmt.Errorf("serve gRPC: %w", serveErr)
 	}
 	return nil
+}
+
+type dialListener struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	path   string
+	once   sync.Once
+}
+
+func newDialListener(ctx context.Context, path string) *dialListener {
+	listenerCtx, cancel := context.WithCancel(ctx)
+	return &dialListener{ctx: listenerCtx, cancel: cancel, path: path}
+}
+
+func (listener *dialListener) Accept() (net.Conn, error) {
+	for {
+		connection, err := (&net.Dialer{}).DialContext(listener.ctx, "unix", listener.path)
+		if err != nil {
+			if listener.ctx.Err() != nil {
+				return nil, net.ErrClosed
+			}
+			if !listener.retry() {
+				return nil, net.ErrClosed
+			}
+			continue
+		}
+		// The proxy accepts producer connections before a consumer necessarily
+		// exists. A gRPC server would otherwise spin through the Unix listen
+		// backlog and accumulate idle transports. Wait for the first client byte,
+		// then replay it to gRPC; this also makes one output connection correspond
+		// to one actual consumer connection.
+		type readResult struct {
+			value byte
+			err   error
+		}
+		read := make(chan readResult, 1)
+		go func() {
+			var first [1]byte
+			_, readErr := connection.Read(first[:])
+			read <- readResult{value: first[0], err: readErr}
+		}()
+		select {
+		case result := <-read:
+			if result.err == nil {
+				return &prefixedConn{Conn: connection, prefix: []byte{result.value}}, nil
+			}
+			_ = connection.Close()
+			if !listener.retry() {
+				return nil, net.ErrClosed
+			}
+		case <-listener.ctx.Done():
+			_ = connection.Close()
+			<-read
+			return nil, net.ErrClosed
+		}
+	}
+}
+
+func (listener *dialListener) retry() bool {
+	timer := time.NewTimer(25 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-listener.ctx.Done():
+		return false
+	}
+}
+
+func (listener *dialListener) Close() error {
+	listener.once.Do(listener.cancel)
+	return nil
+}
+
+func (listener *dialListener) Addr() net.Addr {
+	return &net.UnixAddr{Name: listener.path, Net: "unix"}
+}
+
+type prefixedConn struct {
+	net.Conn
+	prefix []byte
+}
+
+func (connection *prefixedConn) Read(buffer []byte) (int, error) {
+	if len(connection.prefix) != 0 && len(buffer) != 0 {
+		buffer[0] = connection.prefix[0]
+		connection.prefix = connection.prefix[1:]
+		return 1, nil
+	}
+	return connection.Conn.Read(buffer)
+}
+
+type acceptResult struct {
+	connection net.Conn
+	err        error
+}
+
+type multiListener struct {
+	ctx       context.Context
+	cancel    context.CancelFunc
+	listeners []net.Listener
+	accepted  chan acceptResult
+	once      sync.Once
+}
+
+func newMultiListener(ctx context.Context, listeners []net.Listener) *multiListener {
+	listenerCtx, cancel := context.WithCancel(ctx)
+	combined := &multiListener{
+		ctx: listenerCtx, cancel: cancel,
+		listeners: listeners, accepted: make(chan acceptResult),
+	}
+	for _, listener := range listeners {
+		listener := listener
+		go func() {
+			for {
+				connection, err := listener.Accept()
+				select {
+				case combined.accepted <- acceptResult{connection: connection, err: err}:
+				case <-listenerCtx.Done():
+					if connection != nil {
+						_ = connection.Close()
+					}
+					return
+				}
+				if err != nil {
+					return
+				}
+			}
+		}()
+	}
+	return combined
+}
+
+func (listener *multiListener) Accept() (net.Conn, error) {
+	select {
+	case result := <-listener.accepted:
+		return result.connection, result.err
+	case <-listener.ctx.Done():
+		return nil, net.ErrClosed
+	}
+}
+
+func (listener *multiListener) Close() error {
+	listener.once.Do(func() {
+		listener.cancel()
+		closeListeners(listener.listeners)
+	})
+	return nil
+}
+
+func (listener *multiListener) Addr() net.Addr {
+	return listener.listeners[0].Addr()
+}
+
+func closeListeners(listeners []net.Listener) {
+	for _, listener := range listeners {
+		_ = listener.Close()
+	}
 }

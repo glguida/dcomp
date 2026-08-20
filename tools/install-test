@@ -22,6 +22,7 @@ make -C "$root" install "DESTDIR=$stage" PREFIX=/usr
 cat >"$expected" <<'EOF'
 usr/bin/dcomp
 usr/bin/dcomp-healthcheck
+usr/bin/dcomp-proxy
 usr/share/doc/dcomp/LICENSE
 usr/share/doc/dcomp/README.md
 usr/share/doc/dcomp/docs/architecture.md
@@ -41,7 +42,8 @@ diff -u "$expected" "$actual"
 
 for file in \
     "$stage/usr/bin/dcomp" \
-    "$stage/usr/bin/dcomp-healthcheck"
+    "$stage/usr/bin/dcomp-healthcheck" \
+    "$stage/usr/bin/dcomp-proxy"
 do
     [ "$(stat -c '%a' "$file")" = 755 ] || {
         echo "install-test: executable has wrong mode: $file" >&2

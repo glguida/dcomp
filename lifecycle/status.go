@@ -7,6 +7,7 @@ import (
 
 	"github.com/glguida/dcomp/composition"
 	"github.com/glguida/dcomp/engine"
+	"github.com/glguida/dcomp/proxy"
 	"github.com/glguida/dcomp/state"
 )
 
@@ -27,12 +28,24 @@ type NetworkStatus struct {
 	Problem  string
 }
 
+type ProxyStatus struct {
+	InstanceID        string
+	Digest            string
+	PID               int
+	Ready             bool
+	Inputs            int
+	Outputs           int
+	ActiveConnections int64
+	Problem           string
+}
+
 type Status struct {
 	Name       string
 	Desired    bool
 	Digest     string
 	Operation  string
 	Phase      string
+	Proxy      ProxyStatus
 	Networks   []NetworkStatus
 	Components []ComponentStatus
 }
@@ -46,7 +59,10 @@ type ComponentProcess struct {
 
 func (status Status) Operational() bool {
 	if !status.Desired || status.Operation != "" ||
-		len(status.Networks) == 0 || len(status.Components) == 0 {
+		len(status.Components) == 0 {
+		return false
+	}
+	if !status.Proxy.Ready || status.Proxy.Problem != "" {
 		return false
 	}
 	for _, network := range status.Networks {
@@ -138,6 +154,8 @@ func (controller *Controller) Status(ctx context.Context, name string) (Status, 
 			operation.Target,
 			operation.Networks,
 			operation.Containers,
+			operation.Proxy,
+			operation.RuntimeRoot,
 			false,
 		)
 		return result, nil
@@ -160,6 +178,8 @@ func (controller *Controller) Status(ctx context.Context, name string) (Status, 
 		desired.Spec,
 		desired.Networks,
 		desired.Containers,
+		desired.Proxy,
+		desired.RuntimeRoot,
 		true,
 	)
 	return result, nil
@@ -171,8 +191,32 @@ func (controller *Controller) observeStatusResources(
 	spec composition.ResolvedSpec,
 	networks map[string]state.Resource,
 	containers map[string]state.Resource,
+	process *proxy.Process,
+	runtimeRoot string,
 	verifyMembers bool,
 ) {
+	if process == nil {
+		result.Proxy.Problem = "not created"
+	} else {
+		result.Proxy.InstanceID = process.InstanceID
+		result.Proxy.Digest = process.Digest
+		result.Proxy.PID = process.PID
+		status, inspectErr := controller.inspectProxy(ctx, *process)
+		if errors.Is(inspectErr, proxy.ErrNotRunning) {
+			result.Proxy.Problem = "recorded proxy is absent"
+		} else if inspectErr != nil {
+			result.Proxy.Problem = inspectErr.Error()
+		} else {
+			result.Proxy.Ready = status.Ready
+			result.Proxy.Inputs = status.Inputs
+			result.Proxy.Outputs = status.Outputs
+			result.Proxy.ActiveConnections = status.ActiveConnections
+		}
+	}
+	expectedRuntimeDir := runtimeDirectory(runtimeRoot, spec.Name)
+	if process != nil {
+		expectedRuntimeDir = process.RuntimeDir
+	}
 	plans, err := resolvedTopology(spec)
 	if err != nil {
 		result.Networks = append(result.Networks, NetworkStatus{
@@ -218,6 +262,7 @@ func (controller *Controller) observeStatusResources(
 				plans,
 				networks,
 				component,
+				expectedRuntimeDir,
 				resource,
 				exists,
 			),
@@ -234,6 +279,7 @@ func (controller *Controller) observeComponent(
 	plans map[string]networkPlan,
 	networks map[string]state.Resource,
 	component composition.ResolvedComponent,
+	runtimeDir string,
 	resource state.Resource,
 	exists bool,
 ) ComponentStatus {
@@ -275,7 +321,7 @@ func (controller *Controller) observeComponent(
 		}
 		return left.Protocol < right.Protocol
 	})
-	if err := verifyCurrentContainer(spec.Name, component, resource, actual); err != nil {
+	if err := verifyCurrentContainer(spec.Name, runtimeDir, component, resource, actual); err != nil {
 		result.Problem = err.Error()
 		return result
 	}

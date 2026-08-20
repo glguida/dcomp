@@ -1,24 +1,19 @@
 # Architecture
 
-## Purpose
+## Scope
 
-DComp runs a system of independently built Docker components on one host. A
-downstream project owns:
+DComp runs independently built Docker components on one Linux host. The CLI is
+a short-lived controller; each running system has one long-lived
+`dcomp-proxy` data-plane process. There is no global daemon, scheduler, service
+registry, or multi-host control plane.
 
-- its application interface definitions, which may be `.proto` files;
-- the component source and Dockerfiles;
-- one `component.dcomp` beside each component; and
-- a `system.dcomp` that creates instances and links their interfaces.
+Downstream projects own their interface definitions, component images,
+`component.dcomp` files, and `system.dcomp`. DComp owns Docker resource
+lifecycle and every declared interface socket.
 
-DComp supplies a host-side Go library and CLI for validation and lifecycle
-control. It is not a daemon, service registry, router, proxy, sidecar, image
-builder, or container scheduler. After startup, component traffic does not pass
-through DComp.
+## Static description and resolution
 
-## Static system description
-
-A component descriptor names an existing image and its local interface
-endpoints:
+A component declares an existing image and named input/output endpoints:
 
 ```text
 docker example/filter:1
@@ -26,222 +21,157 @@ input example.document.v1.Documents documents
 output example.document.v1.Documents filtered
 ```
 
-A system file creates component instances and links one input directly to one
-output:
+A system creates instances and explicit links:
 
 ```text
 system example
 component source components/source
 component filter components/filter
-bind source ./source.conf /etc/source.conf ro
-volume filter cache /var/lib/filter rw
-args filter serve --strict
-publish filter tcp 127.0.0.1 8080 8080
-egress source
-egress filter
 link filter.documents source.documents
 ```
 
-The component path may be absolute. A relative path is resolved from the
-directory containing `system.dcomp`. It may name either a directory containing
-`component.dcomp` or the descriptor itself.
+Every input has exactly one link. Outputs may fan out; cycles are valid. The
+two endpoint service identifiers must match. DComp treats the resulting byte
+streams as opaque and does not load schemas.
 
-The instance runtime directives are:
-
-- `bind INSTANCE SOURCE TARGET ro|rw`;
-- `volume INSTANCE LOGICAL_NAME TARGET ro|rw`;
-- `args INSTANCE ARG...`;
-- `publish INSTANCE tcp|udp HOST_IP HOST_PORT CONTAINER_PORT`; and
-- `egress INSTANCE`.
-
-They must follow the component declaration. Bind sources are made canonical and
-must exist. Container mount targets are absolute, clean, and non-overlapping.
-Published host sockets and volume names must be unique in their applicable
-scope. A published port requires the same instance to declare `egress`, because
-Docker cannot publish from an internal-only bridge. These directives are typed
-policy, not arbitrary Docker argument passthrough.
-
-The two sides of a link are explicit endpoint references. DComp does not infer
-links from interface names. Every input must have exactly one link; an output
-may serve any number of inputs. The input and output must declare the same
-nominal interface identifier.
-
-Links describe addresses, not startup dependencies. Cycles are valid.
-
-Before changing Docker, DComp:
-
-1. parses all component and system descriptors;
-2. validates names, endpoint directions, complete input binding, and nominal
-   interface-name matches;
-3. validates and canonicalizes each instance's runtime policy;
-4. resolves every image reference to an immutable image ID;
-5. requires each image to define a Docker `HEALTHCHECK`; and
-6. requires every image-declared OCI `VOLUME` target to have an explicit bind
-   or named-volume mount.
-
-DComp does not read interface declarations from OCI labels. It does not build
-or pull images. Each image must already be resolvable by the local Docker
-Engine.
+Before mutation DComp validates descriptors and runtime policy, resolves every
+image reference to an immutable ID, checks the image health-check declaration,
+and incorporates endpoint definitions and links into stable digests.
 
 ## Runtime topology
 
-DComp creates one private base bridge for each component. A base bridge has one
-member and is internal unless that component explicitly declares `egress`.
-Giving two components egress does not place them together on a shared external
-network.
+By default a component runs with Docker network mode `none`: it has a network
+namespace but no Docker network attachment. If `egress INSTANCE` explicitly
+requests external routing, DComp creates one dedicated, non-internal bridge
+with only that component as a member. The bridge provides egress policy; it
+does not carry DComp interface traffic.
 
-Each direct link receives another private internal bridge containing exactly
-the output component and the input component. Output fan-out therefore creates
-separate networks for separate consumers. Components have no network-level path
-to unlinked components, and a consumer linked through an intermediate cannot
-reach the upstream component directly.
+There are no per-link Docker networks. Components linked to each other have no
+Docker network path to one another.
 
-Ports are published only by an explicit `publish` directive. DComp does not
-inject the Docker socket or its state directory.
-
-A component with declared outputs listens on TCP `0.0.0.0:50051`. Separate
-container network namespaces make the fixed port unambiguous. How a component
-dispatches multiple declared outputs on that listener is application protocol
-behavior, not DComp behavior. A sink or workload component may declare only
-inputs and does not need to open that listener.
-
-For each linked input, DComp injects:
+The proxy creates one Unix listener for every resolved endpoint:
 
 ```text
-DCOMP_LINK_<INPUT_NAME>=dns:///<OUTPUT_COMPONENT>:50051
+<runtime-root>/<system>/in/<instance>.<input>
+<runtime-root>/<system>/out/<instance>.<output>
 ```
 
-Input names are converted to uppercase and hyphens become underscores. For
-example, `model-store` becomes `DCOMP_LINK_MODEL_STORE`. The receiving
-component consumes that injected address. Components communicate directly
-through Docker DNS; DComp never forwards, decodes, validates, or transforms
-application messages.
+The default runtime root is `/var/run/dcomp`. A component receives individual
+bind mounts at:
 
-Every component image must define a meaningful OCI `HEALTHCHECK`. DComp checks
-that the declaration exists and observes Docker's health result. It does not
-mandate an application health protocol, inspect a reflection service, or
-compare running services with schema definitions. Standard gRPC health,
-reflection, and protobuf/gRPC multiplexing are conventions implemented by the
-optional Go helper package.
+```text
+/run/dcomp/in/<input>
+/run/dcomp/out/<output>
+```
 
-## Lifecycle control
+Mounting files read-only rather than mounting the containing host directories
+enforces endpoint visibility and prevents replacement of socket pathnames;
+socket communication itself remains bidirectional. User binds and named
+volumes are rejected if their targets overlap `/run/dcomp`.
 
-The controller is a library invoked by a short-lived CLI process. It connects
-only to the local Docker Unix socket; remote Docker hosts are rejected.
+The corresponding environment is:
 
-For a new system, DComp:
+```text
+DCOMP_IN_<INPUT>=unix:///run/dcomp/in/<input>
+DCOMP_OUT_<OUTPUT>=unix:///run/dcomp/out/<output>
+```
 
-1. creates the required component and link networks;
-2. creates the component containers;
-3. attaches each container only to its planned networks;
-4. starts the components; and
-5. commits their exact resource identities.
+Names are uppercased and hyphens become underscores. Components connect to
+both input and output addresses. They never bind or listen on interface paths.
 
-Health is reported per component after start. An unhealthy or exited component
-is a stable, inspectable system state; it does not leave the whole apply
-transaction pending.
+## Connection routing
 
-For an existing system, component digests select which containers can be
-retained. An unchanged container keeps its immutable ID and stays running while
-link networks are reconciled around it. Only added or changed components are
-created; removed or superseded components are retired. Links still impose no
-provider/consumer startup order, and cycles remain valid.
+Each output listener feeds a pool of producer-side connections. When a client
+connects to an input listener, the proxy takes one connection from the linked
+output pool and starts two byte-copy directions. EOF and shutdown close both
+sides cleanly.
 
-Docker is the source of truth for observed objects. Small host-side files
-record the last committed deployment and at most one incomplete operation.
-DComp records intent before Docker mutation and can resume from verified Docker
-facts after interruption. The state root is bound write-once to Docker's
-stable engine ID, preventing recorded immutable IDs from being reused against
-another local daemon. See [Lifecycle](lifecycle.md).
+An output linked to several inputs shares its connection pool across those
+routes. Each consumer connection receives a distinct producer connection;
+bytes are never broadcast or merged. This is the fan-out model required for
+bidirectional protocols such as gRPC.
 
-## Identity and mutation authority
+If either component disconnects, the stream pair is released. Subsequent
+connections are paired normally, allowing one component container to restart
+without restarting the proxy or its peers.
 
-DComp distinguishes:
+## Proxy process and readiness
 
-1. an immutable image ID;
-2. an immutable container or network ID;
-3. a digest for each resolved component; and
-4. a digest of the complete resolved system.
+`dcomp-proxy` receives a strict JSON configuration containing the system,
+instance identity, wiring digest, endpoint paths, and links. It creates all
+listeners, writes `proxy.pid` and `proxy.ready`, opens a local control socket,
+then signals readiness through an inherited file descriptor. Components do not
+start before that signal.
 
-A component digest covers its immutable image ID, interface declaration,
-normalized runtime policy, and inbound target component. Outgoing links do not
-change a provider's component digest, so adding a consumer does not replace the
-provider. The system digest additionally covers the complete direct-link set.
-Descriptor paths and mutable image references are excluded; canonical bind
-source paths are runtime identity.
+The control socket supports identity-checked status and graceful shutdown.
+Status reports the PID, wiring digest, endpoint counts, pending connections,
+and active stream-pair count. A shutdown request must carry the recorded proxy
+instance ID.
 
-Docker named volumes expose no immutable ID. DComp instead uses deterministic
-component-scoped names and verifies their driver and ownership labels before
-mounting them. Persistent volumes are never deleted implicitly.
+Unix socket pathnames have a small kernel limit. If a valid runtime endpoint
+would exceed it, the proxy binds a deterministic short path in a private,
+user-owned hidden directory in the runtime-root filesystem and hard-links that
+socket inode into the documented runtime tree. Keeping both names on the same
+filesystem also works when `/var/run` and `/tmp` are different mounts. Docker
+still mounts the named runtime-tree file and the container address remains
+unchanged.
 
-External host tooling does not reproduce that naming convention. The
-`dcomp volume [--json] SYSTEM COMPONENT LOGICAL` query constructs the name
-inside DComp, inspects the Docker object under the system's shared lifecycle
-lock, verifies the state-root engine binding and every expected label, and only
-then returns the physical Docker name. This remains valid after `down`, because
-the system lock and engine binding remain while the persistent volume is
-preserved.
+Endpoint sockets are mode `0666` because component images may run under
+arbitrary non-root UIDs. Runtime directories, configuration, PID, readiness,
+control, and log files are owner-only. `SO_PEERCRED` enforcement is optional
+future hardening; there is no encryption or application authentication in
+0.2.
 
-System names are host-wide Docker identities. A different host-side state root
-does not create another Docker namespace for the same system name.
+## Apply lifecycle
 
-Human-readable names provide configuration and Docker DNS, not mutation
-authority. DComp labels objects it creates, records their full IDs, and verifies
-identity, ownership, image, and network immediately before mutation. A
-same-named foreign object is an error. Start, stop, and remove operations use
-full immutable IDs.
+For a new deployment DComp:
+
+1. records the target operation;
+2. creates a dedicated bridge for each component that declares `egress`;
+3. starts the proxy and waits for readiness;
+4. creates containers with only their endpoint socket mounts;
+5. verifies exact mounts, environment, security policy, and network mode;
+6. starts components; and
+7. commits Docker and proxy identities as desired state.
+
+An image-only change may keep the proxy and unrelated containers. A wiring or
+endpoint change gets a new proxy wiring digest. DComp then retires containers,
+stops the old proxy, starts the new proxy, and recreates containers so their
+individual bind mounts refer to the new socket inodes. This is why dynamic
+rewiring without component restart is not a 0.2 feature.
+
+`down` verifies recorded ownership, stops/removes component containers first,
+stops the proxy second, then removes transient egress networks. Named volumes
+survive.
+
+## Identity and recovery
+
+Docker mutations use immutable IDs after ownership verification. Networks,
+containers, volumes, and the proxy have separate state records. A proxy record
+contains its instance ID, PID, wiring digest, runtime directory, control
+socket, and log path. DComp never signals a PID until the live control socket
+has confirmed the same instance and PID.
+
+Operation intent and pending creates are written before mutation. A lost
+Docker response is recovered by inspecting the operation-owned name. A proxy
+start lost before state publication is recovered by its configuration and
+identity-checked control socket. See [Lifecycle](lifecycle.md).
 
 ## Observation
 
-`dcomp ps [NAME]` lists running components across recorded systems, or one
-named system, under shared lifecycle locks. `--all` includes non-running
-component records and `--json` provides stable machine output.
-`dcomp status NAME` takes a shared lifecycle lock and inspects the recorded
-networks and component containers as one coherent generation.
-`dcomp logs NAME` reads the Docker stdout and stderr snapshots for all verified
-component containers. `dcomp logs -f NAME` follows them concurrently and emits
-one host-side stream with timestamp, component, stream, and message. Individual
-log records are capped at one MiB while being assembled.
+`status` observes one coherent state generation under a shared lock and
+reports proxy, network, and component health. `logs` concurrently merges
+Docker logs with `proxy.log`; proxy records use the source name `@proxy`.
+Observation never repairs resources.
 
-Log aggregation is observational. DComp does not install an agent or sidecar,
-intercept RPCs, or define what a component logs.
+## Trust boundary and limits
 
-## Process behavior
+DComp trusts the host, its durable and runtime roots, and the local Docker
+socket. Components receive no Docker socket. Fixed container policy enables an
+init process, restart policy `no`, `no-new-privileges`, drops `NET_RAW`, and
+sets a 2048-process limit.
 
-Docker starts the image entrypoint and delivers its configured stop signal.
-DComp requests a bounded Docker stop; the component must stop accepting work,
-drain in-flight operations within a bounded deadline, and exit before Docker's
-timeout.
-
-Containers use Docker restart policy `no`, an init process,
-`no-new-privileges`, a dropped `NET_RAW` capability, and a 2048-process PIDs
-limit. These are fixed DComp policy rather than configuration. `dcomp restart
-NAME COMPONENT...` is an explicit, recorded operation on selected existing
-immutable container IDs. With no component arguments it restarts every
-component.
-
-## Trust boundary
-
-DComp trusts the host, its state directory, and the local Docker socket.
-Possession of that socket is effectively host-administrative authority.
-
-Internal component and link bridges block external routing by default. Only an
-explicit `egress` component base bridge is externally routed. DComp also
-rejects unexpected network attachments when verifying a container.
-
-## Deliberate limits
-
-DComp is single-host and Docker-specific. It deliberately provides no:
-
-- multi-host placement, replicas, or failover;
-- dynamic registry, discovery protocol, or runtime rewiring;
-- router, proxy, service mesh, or sidecar;
-- image build or pull workflow;
-- automatic container restart policy;
-- secret, user, arbitrary environment, entrypoint, privileged, configurable
-  capability or resource-limit, or device configuration;
-- bind propagation or adoption of arbitrary existing Docker volumes; or
-- speculative repair when ownership cannot be proved.
-
-The narrow boundary keeps the component contract language-neutral and the
-host controller small.
+Version 0.2 deliberately has no multi-host overlay, runtime rewiring,
+replication, automatic failover, payload inspection, protocol translation,
+encryption, arbitrary environment or privilege passthrough, or global
+long-lived daemon.

@@ -21,6 +21,7 @@ all: build
 build:
 	mkdir -p bin
 	CGO_ENABLED=$(CGO_ENABLED) $(GO) build -buildvcs=false -trimpath -o bin/dcomp ./cmd/dcomp
+	CGO_ENABLED=$(CGO_ENABLED) $(GO) build -buildvcs=false -trimpath -o bin/dcomp-proxy ./cmd/dcomp-proxy
 	CGO_ENABLED=$(CGO_ENABLED) $(GO) build -buildvcs=false -trimpath -o bin/dcomp-healthcheck ./cmd/dcomp-healthcheck
 
 test:
@@ -59,12 +60,13 @@ integration: build examples
 	tools/integration-test
 
 install:
-	@test -x bin/dcomp && test -x bin/dcomp-healthcheck || { \
+	@test -x bin/dcomp && test -x bin/dcomp-proxy && test -x bin/dcomp-healthcheck || { \
 		echo "dcomp: run 'make build' before 'make install'" >&2; \
 		exit 1; \
 	}
 	[ -d "$(DESTDIR)$(BINDIR)" ] || $(INSTALL) -d -m 0755 "$(DESTDIR)$(BINDIR)"
 	$(INSTALL) -m 0755 bin/dcomp "$(DESTDIR)$(BINDIR)/dcomp"
+	$(INSTALL) -m 0755 bin/dcomp-proxy "$(DESTDIR)$(BINDIR)/dcomp-proxy"
 	$(INSTALL) -m 0755 bin/dcomp-healthcheck "$(DESTDIR)$(BINDIR)/dcomp-healthcheck"
 	[ -d "$(DESTDIR)$(DOCDIR)/docs" ] || $(INSTALL) -d -m 0755 "$(DESTDIR)$(DOCDIR)/docs"
 	$(INSTALL) -m 0644 README.md "$(DESTDIR)$(DOCDIR)/README.md"
@@ -81,6 +83,7 @@ install:
 
 uninstall:
 	rm -f "$(DESTDIR)$(BINDIR)/dcomp"
+	rm -f "$(DESTDIR)$(BINDIR)/dcomp-proxy"
 	rm -f "$(DESTDIR)$(BINDIR)/dcomp-healthcheck"
 	rm -f "$(DESTDIR)$(DOCDIR)/README.md"
 	rm -f "$(DESTDIR)$(DOCDIR)/LICENSE"
