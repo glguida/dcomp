@@ -50,6 +50,10 @@ type Status struct {
 	Components         []ComponentStatus
 	RetiringNetworks   []NetworkStatus
 	RetiringComponents []ComponentStatus
+	// Spec is the resolved system the reported resources belong to: the
+	// pending operation's target when one is recorded, otherwise the committed
+	// deployment. Nil when the system is absent.
+	Spec *composition.ResolvedSpec
 }
 
 type ComponentProcess struct {
@@ -150,6 +154,7 @@ func (controller *Controller) Status(ctx context.Context, name string) (Status, 
 		result.Operation = operation.Kind
 		result.Phase = operation.Phase
 		result.Digest = operation.Target.Digest
+		result.Spec = &operation.Target
 		controller.observeStatusResources(
 			ctx,
 			&result,
@@ -175,6 +180,7 @@ func (controller *Controller) Status(ctx context.Context, name string) (Status, 
 	}
 	result.Desired = true
 	result.Digest = desired.Spec.Digest
+	result.Spec = &desired.Spec
 	controller.observeStatusResources(
 		ctx,
 		&result,

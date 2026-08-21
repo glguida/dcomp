@@ -98,6 +98,43 @@ The command exits 0 only when the system is committed and operational. It
 exits 1 for an absent, pending, stopped, unhealthy, missing, or otherwise
 degraded system, after still producing its normal text or JSON status.
 
+### `view`
+
+```text
+dcomp [GLOBAL_OPTIONS] view [--json] FILE|NAME
+```
+
+Describe one system's declared topology without changing lifecycle state.
+When the argument is an existing regular file, DComp parses it and reports its
+components, interfaces, links, mounts, arguments, and external routes without
+resolving images or contacting Docker. When the argument is a system name,
+DComp joins the recorded resolved topology with current proxy, network, and
+component observations. A missing argument containing a path separator or
+ending in `.dcomp` is treated as a missing file rather than a system name.
+
+Plain output is intended for terminals. `--json` emits the API 2 view
+document. Unlike `status`, observing an absent named system succeeds with an
+empty, non-operational view; consumers should inspect `desired` and
+`operational`.
+
+### `dash`
+
+```text
+dcomp [GLOBAL_OPTIONS] dash [--listen ADDRESS] [FILE|NAME...]
+```
+
+Serve the bundled read-only system viewer and API 2 view documents until the
+process is interrupted. The default address is `127.0.0.1:8199`. With no
+arguments, the dashboard lists every recorded system. Arguments restrict it
+to named systems and parsed system files; two files declaring the same system
+name are rejected. Observations of recorded systems are cached for one second.
+
+The dashboard has no authentication. Its loopback default is the security
+boundary; choosing a non-loopback listen address exposes topology, host bind
+paths, image identities, resource state, and diagnostics to clients that can
+reach that address. See [System view](view.md) for the document and HTTP
+contracts.
+
 ### `volume`
 
 ```text

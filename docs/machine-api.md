@@ -171,6 +171,138 @@ An absent system is a successful observation with a non-operational result:
 
 The command exits 1 for this document because `operational` is false.
 
+## View document
+
+```text
+dcomp [GLOBAL_OPTIONS] view --json FILE|NAME
+```
+
+A view document describes declared topology and, for a recorded system, joins
+it with current observations. Representative state response:
+
+```json
+{
+  "api_version": 2,
+  "source": "state",
+  "name": "demo",
+  "digest": "sha256:...",
+  "desired": true,
+  "operational": true,
+  "components": [
+    {
+      "name": "worker",
+      "image_ref": "example/worker:1",
+      "image_id": "sha256:...",
+      "inputs": [{"name":"requests","service":"example.v1.Requests"}],
+      "outputs": [{"name":"responses","service":"example.v1.Requests"}],
+      "egress": false,
+      "binds": [],
+      "volumes": [],
+      "args": [],
+      "published_ports": [],
+      "status": {
+        "name": "worker",
+        "container_id": "...",
+        "status": "running",
+        "health": "healthy",
+        "exit_code": 0,
+        "problem": "",
+        "published_ports": []
+      }
+    },
+    {
+      "name": "source",
+      "image_ref": "example/source:1",
+      "image_id": "sha256:...",
+      "inputs": [],
+      "outputs": [{"name":"requests","service":"example.v1.Requests"}],
+      "egress": false,
+      "binds": [],
+      "volumes": [],
+      "args": [],
+      "published_ports": [],
+      "status": {
+        "name": "source",
+        "container_id": "...",
+        "status": "running",
+        "health": "healthy",
+        "exit_code": 0,
+        "problem": "",
+        "published_ports": []
+      }
+    }
+  ],
+  "links": [
+    {
+      "service": "example.v1.Requests",
+      "input": {"component":"worker","endpoint":"requests"},
+      "output": {"component":"source","endpoint":"requests"}
+    }
+  ],
+  "proxy": {
+    "ready": true,
+    "inputs": 1,
+    "outputs": 1,
+    "active_connections": 1,
+    "problem": ""
+  }
+}
+```
+
+- `source` is `file` for a parsed description file or `state` for a named
+  system observed from durable state.
+- `name`, `desired`, `operational`, and the optional `digest`, `operation`, and
+  `phase` have the same lifecycle meanings as in a status document. File views
+  are neither desired nor operational.
+- `components` is sorted by component name. Every item contains its authored
+  image reference, sorted endpoint declarations, egress policy, binds,
+  volumes, arguments, and declared port publications. `image_id` and `status`
+  are present only in state views with a resolved component and observation.
+- `links` is sorted by input reference. `activity` is an optional future
+  per-link observation and is absent in API 2; absence means unknown, not zero.
+- `networks` may be present for a recorded topology with egress networks, and
+  `proxy` is present for a recorded topology. Network and component status
+  objects use the status-document schemas. The proxy object reports readiness,
+  endpoint counts, system-wide active stream pairs, and a diagnostic problem;
+  it intentionally omits process identity.
+
+`digest`, `operation`, `phase`, `networks`, and `proxy` are optional. Within a
+component, `image_id` and `status` are optional. Within a link, `activity` is
+optional. Arrays that are part of a component or the top-level topology are
+otherwise present even when empty.
+
+An absent named system emits a successful `source=state` document with empty
+component and link arrays, `desired=false`, and `operational=false`. Unlike
+`status --json`, `view --json` exits 0 after that observation.
+
+The complete topology semantics and human viewer behavior are documented in
+[System view](view.md).
+
+## Dashboard HTTP documents
+
+```text
+dcomp [GLOBAL_OPTIONS] dash [--listen ADDRESS] [FILE|NAME...]
+```
+
+The dashboard serves two read-only JSON endpoints:
+
+```text
+GET /api/v2/systems
+GET /api/v2/view/NAME
+```
+
+The systems response is exactly:
+
+```json
+{"api_version":2,"systems":["demo"]}
+```
+
+`systems` is sorted and contains each served system name once. The view
+response is exactly the API 2 view document described above. Successful JSON
+responses use `Content-Type: application/json` and `Cache-Control: no-store`.
+Unknown or unselected names return 404, unsupported methods return 405, and
+observation failures return 500 with diagnostic text rather than JSON.
+
 ## Processes document
 
 ```text

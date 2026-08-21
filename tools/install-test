@@ -30,11 +30,13 @@ usr/share/doc/dcomp/docs/assets/banner.svg
 usr/share/doc/dcomp/docs/assets/legame.svg
 usr/share/doc/dcomp/docs/assets/pettine.svg
 usr/share/doc/dcomp/docs/assets/simbolo.svg
+usr/share/doc/dcomp/docs/assets/system-view.png
 usr/share/doc/dcomp/docs/component-contract.md
 usr/share/doc/dcomp/docs/lifecycle.md
 usr/share/doc/dcomp/docs/machine-api.md
 usr/share/doc/dcomp/docs/prior-art.md
 usr/share/doc/dcomp/docs/reference.md
+usr/share/doc/dcomp/docs/view.md
 usr/share/doc/dcomp/examples/README.md
 usr/share/doc/dcomp/sdk/node/README.md
 usr/share/doc/dcomp/sdk/python/README.md

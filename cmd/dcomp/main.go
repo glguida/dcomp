@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -29,6 +30,8 @@ Usage:
   dcomp [--state-root DIR] [--runtime-root DIR] up FILE
   dcomp [--state-root DIR] [--runtime-root DIR] ps [-a|--all] [--json] [NAME]
   dcomp [--state-root DIR] [--runtime-root DIR] status [--json] NAME
+  dcomp [--state-root DIR] [--runtime-root DIR] view [--json] FILE|NAME
+  dcomp [--state-root DIR] [--runtime-root DIR] dash [--listen ADDRESS] [FILE|NAME...]
   dcomp [--state-root DIR] [--runtime-root DIR] volume [--json] SYSTEM COMPONENT LOGICAL
   dcomp [--state-root DIR] [--runtime-root DIR] logs [-f|--follow] NAME [COMPONENT...]
   dcomp [--state-root DIR] [--runtime-root DIR] attach [--ready-fd FD] SYSTEM COMPONENT
@@ -200,6 +203,84 @@ func run(arguments []string) int {
 		}
 		if !status.Operational() {
 			return 1
+		}
+	case "view":
+		viewFlags := flag.NewFlagSet("dcomp view", flag.ContinueOnError)
+		viewFlags.SetOutput(os.Stderr)
+		jsonOutput := viewFlags.Bool("json", false, "emit stable machine-readable JSON")
+		if err := viewFlags.Parse(commandArgs); err != nil {
+			return 2
+		}
+		if viewFlags.NArg() != 1 {
+			return commandUsage("view expects one FILE or NAME")
+		}
+		target := viewFlags.Arg(0)
+		var document viewDocument
+		if info, statErr := os.Stat(target); statErr == nil && info.Mode().IsRegular() {
+			spec, err := composition.Load(target)
+			if err != nil {
+				return commandError(err, ctx)
+			}
+			document = viewFromSpec(spec)
+		} else if strings.ContainsRune(target, os.PathSeparator) ||
+			strings.HasSuffix(target, ".dcomp") {
+			return commandError(fmt.Errorf("system file %q does not exist", target), ctx)
+		} else {
+			status, err := controller.Status(ctx, target)
+			if err != nil {
+				return commandError(err, ctx)
+			}
+			document = viewFromStatus(status)
+		}
+		if *jsonOutput {
+			if err := writeViewJSON(os.Stdout, document); err != nil {
+				return commandError(err, ctx)
+			}
+		} else {
+			printView(os.Stdout, document)
+		}
+	case "dash":
+		dashFlags := flag.NewFlagSet("dcomp dash", flag.ContinueOnError)
+		dashFlags.SetOutput(os.Stderr)
+		listen := dashFlags.String(
+			"listen",
+			"127.0.0.1:8199",
+			"local address the dash server binds",
+		)
+		if err := dashFlags.Parse(commandArgs); err != nil {
+			return 2
+		}
+		names := make([]string, 0, dashFlags.NArg())
+		files := make(map[string]string)
+		for _, target := range dashFlags.Args() {
+			if info, statErr := os.Stat(target); statErr == nil && info.Mode().IsRegular() {
+				spec, err := composition.Load(target)
+				if err != nil {
+					return commandError(err, ctx)
+				}
+				if _, duplicate := files[spec.Name]; duplicate {
+					return commandError(
+						fmt.Errorf("system %q is served from two files", spec.Name),
+						ctx,
+					)
+				}
+				files[spec.Name] = target
+				continue
+			}
+			names = append(names, target)
+		}
+		listener, err := net.Listen("tcp", *listen)
+		if err != nil {
+			return commandError(err, ctx)
+		}
+		fmt.Fprintf(os.Stderr, "dcomp dash observing on http://%s/\n", listener.Addr())
+		server := newDashServer(
+			controllerBackend{controller: &controller},
+			names,
+			files,
+		)
+		if err := runDash(ctx, listener, server); err != nil {
+			return commandError(err, ctx)
 		}
 	case "volume":
 		volumeFlags := flag.NewFlagSet("dcomp volume", flag.ContinueOnError)

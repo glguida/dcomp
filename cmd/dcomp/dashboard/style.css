@@ -1,0 +1,142 @@
+/* The four-pass palette on warm paper. Flat fills, ink line work, Helvetica
+   set tight, one monospace for identifiers — see docs/styleguide.pdf. */
+:root {
+  --carta: #EFE7D6;
+  --inchiostro: #201A12;
+  --blu: #2A5CAA;
+  --rosso: #D8402E;
+  --giallo: #EFB02C;
+  --verde: #3E7C5A;
+  --ink-50: rgba(32, 26, 18, 0.50);
+  --ink-30: rgba(32, 26, 18, 0.30);
+  --sans: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  background: var(--carta);
+  color: var(--inchiostro);
+  font-family: var(--sans);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+header {
+  display: flex;
+  align-items: baseline;
+  gap: 24px;
+  padding: 14px 20px 10px;
+  border-bottom: 2px solid var(--inchiostro);
+}
+.specline {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  white-space: nowrap;
+}
+.specline span { color: var(--blu); }
+nav { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; }
+nav button {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: none;
+  border: 2px solid transparent;
+  color: var(--inchiostro);
+  padding: 2px 8px;
+  cursor: pointer;
+}
+nav button.current { border-color: var(--inchiostro); }
+.observing {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  white-space: nowrap;
+}
+.observing.lost {
+  color: var(--rosso);
+  animation: dcomp-blink 1.2s steps(1) infinite;
+}
+main { flex: 1; display: flex; min-height: 0; }
+#stagebox { flex: 1; min-width: 0; position: relative; }
+#stage { width: 100%; height: 100%; display: block; cursor: grab; }
+#stage.panning { cursor: grabbing; }
+#stage.lost { opacity: 0.45; }
+#opbanner {
+  position: absolute;
+  top: 12px;
+  left: 20px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+}
+#wordmark {
+  position: absolute;
+  left: 20px;
+  bottom: 10px;
+  line-height: 1;
+  pointer-events: none;
+}
+#wordmark .mark {
+  font-size: 44px;
+  font-weight: 700;
+  letter-spacing: -0.06em;
+}
+#wordmark .claim {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  margin-top: 6px;
+}
+aside {
+  width: 340px;
+  border-left: 2px solid var(--inchiostro);
+  padding: 16px 18px;
+  overflow-y: auto;
+}
+aside h2 {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  margin-bottom: 12px;
+}
+aside h2 em { color: var(--blu); font-style: normal; }
+.descriptor {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-all;
+  border-left: 3px solid var(--blu);
+  padding-left: 10px;
+  margin-bottom: 16px;
+}
+.descriptor .accent { color: var(--rosso); }
+.rule { border-top: 1px solid var(--ink-30); margin: 14px 0; }
+.legend {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  line-height: 2.1;
+}
+.legend svg { vertical-align: -2px; margin-right: 8px; }
+footer {
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  padding: 6px 20px;
+  border-top: 2px solid var(--inchiostro);
+}
+footer .feet {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  margin-left: auto;
+  color: var(--ink-50);
+}
+@keyframes dcomp-march { to { stroke-dashoffset: -20; } }
+@keyframes dcomp-blink { 0%, 55% { opacity: 1; } 56%, 100% { opacity: 0; } }
+.march { animation: dcomp-march 1.6s linear infinite; }
+.blink { animation: dcomp-blink 1.2s steps(1) infinite; }
+text { font-family: var(--sans); fill: var(--inchiostro); }
+.hit { cursor: pointer; }
