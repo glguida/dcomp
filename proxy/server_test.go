@@ -39,6 +39,101 @@ func TestProxyForwardsBidirectionallyAndReconnects(t *testing.T) {
 	}
 }
 
+func TestProxyReportsPerLinkConnectionAndByteMetrics(t *testing.T) {
+	config := testConfig(t, true)
+	cancel, result := startTestProxy(t, config)
+	defer func() {
+		cancel()
+		if err := <-result; err != nil {
+			t.Fatalf("proxy Run: %v", err)
+		}
+	}()
+
+	filterProducer := dialUnix(t, HostSocket(
+		config.RuntimeDir, DirectionOutput, "source", "documents",
+	))
+	filterConsumer := dialUnix(t, HostSocket(
+		config.RuntimeDir, DirectionInput, "filter", "documents",
+	))
+	defer filterProducer.Close()
+	defer filterConsumer.Close()
+	writeAndRead(t, filterConsumer, filterProducer, "filter request")
+	writeAndRead(t, filterProducer, filterConsumer, "filter response")
+
+	archiveProducer := dialUnix(t, HostSocket(
+		config.RuntimeDir, DirectionOutput, "source", "documents",
+	))
+	archiveConsumer := dialUnix(t, HostSocket(
+		config.RuntimeDir, DirectionInput, "archive", "documents",
+	))
+	defer archiveProducer.Close()
+	defer archiveConsumer.Close()
+	writeAndRead(t, archiveConsumer, archiveProducer, "archive request")
+	writeAndRead(t, archiveProducer, archiveConsumer, "archive response")
+
+	status, err := (&ProcessManager{}).Inspect(
+		context.Background(), processForConfig(config, os.Getpid()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.ActiveConnections != 2 || len(status.Links) != 2 {
+		t.Fatalf("proxy metrics = %#v", status)
+	}
+	byInput := make(map[string]LinkMetrics, len(status.Links))
+	for _, link := range status.Links {
+		byInput[link.InputComponent+"."+link.InputEndpoint] = link
+	}
+	assertLinkMetrics := func(
+		name string,
+		requestBytes,
+		responseBytes uint64,
+	) {
+		t.Helper()
+		metrics, exists := byInput[name]
+		if !exists {
+			t.Fatalf("metrics for %s are absent: %#v", name, status.Links)
+		}
+		if metrics.ActiveConnections != 1 ||
+			metrics.BytesInputToOutput != requestBytes ||
+			metrics.BytesOutputToInput != responseBytes {
+			t.Fatalf("metrics for %s = %#v", name, metrics)
+		}
+	}
+	assertLinkMetrics("filter.documents", uint64(len("filter request")), uint64(len("filter response")))
+	assertLinkMetrics("archive.documents", uint64(len("archive request")), uint64(len("archive response")))
+
+	_ = filterConsumer.Close()
+	_ = filterProducer.Close()
+	_ = archiveConsumer.Close()
+	_ = archiveProducer.Close()
+	deadline := time.Now().Add(time.Second)
+	for {
+		status, err = (&ProcessManager{}).Inspect(
+			context.Background(), processForConfig(config, os.Getpid()),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		allInactive := status.ActiveConnections == 0
+		for _, metrics := range status.Links {
+			allInactive = allInactive && metrics.ActiveConnections == 0
+		}
+		if allInactive {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("link gauges remained active after disconnect: %#v", status.Links)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	for _, metrics := range status.Links {
+		if metrics.BytesInputToOutput == 0 || metrics.BytesOutputToInput == 0 {
+			t.Fatalf("disconnect cleared cumulative counters: %#v", metrics)
+		}
+	}
+}
+
 func TestForwardLogsCopyErrorsAndReleasesPair(t *testing.T) {
 	var logs bytes.Buffer
 	previousOutput, previousFlags, previousPrefix := log.Writer(), log.Flags(), log.Prefix()

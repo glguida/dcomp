@@ -51,16 +51,24 @@ type viewEndpointRefDocument struct {
 }
 
 type viewLinkDocument struct {
-	Service string                  `json:"service"`
-	Input   viewEndpointRefDocument `json:"input"`
-	Output  viewEndpointRefDocument `json:"output"`
-	// Activity is reserved for per-link proxy accounting, which is not
-	// currently reported. Absence means "unknown", not "idle".
-	Activity *viewLinkActivityDocument `json:"activity,omitempty"`
+	Service           string                    `json:"service"`
+	Input             viewEndpointRefDocument   `json:"input"`
+	Output            viewEndpointRefDocument   `json:"output"`
+	Active            *bool                     `json:"active,omitempty"`
+	ActiveConnections *int64                    `json:"active_connections,omitempty"`
+	Activity          *viewLinkActivityDocument `json:"activity,omitempty"`
 }
 
 type viewLinkActivityDocument struct {
-	ActiveConnections int64 `json:"active_connections"`
+	BytesInputToOutput uint64 `json:"bytes_input_to_output"`
+	BytesOutputToInput uint64 `json:"bytes_output_to_input"`
+}
+
+type viewLinkIdentity struct {
+	inputComponent  string
+	inputEndpoint   string
+	outputComponent string
+	outputEndpoint  string
 }
 
 type viewMountDocument struct {
@@ -171,8 +179,31 @@ func viewFromStatus(status lifecycle.Status) viewDocument {
 	sort.Slice(document.Components, func(i, j int) bool {
 		return document.Components[i].Name < document.Components[j].Name
 	})
+	metricsByLink := make(map[viewLinkIdentity]int, len(status.Proxy.Links))
+	for index, metrics := range status.Proxy.Links {
+		metricsByLink[viewLinkIdentity{
+			inputComponent: metrics.InputComponent, inputEndpoint: metrics.InputEndpoint,
+			outputComponent: metrics.OutputComponent, outputEndpoint: metrics.OutputEndpoint,
+		}] = index
+	}
 	for _, link := range status.Spec.Links {
-		document.Links = append(document.Links, viewLink(link, services))
+		item := viewLink(link, services)
+		identity := viewLinkIdentity{
+			inputComponent: link.Input.Component, inputEndpoint: link.Input.Endpoint,
+			outputComponent: link.Output.Component, outputEndpoint: link.Output.Endpoint,
+		}
+		if index, exists := metricsByLink[identity]; exists {
+			metrics := status.Proxy.Links[index]
+			active := metrics.ActiveConnections > 0
+			connections := metrics.ActiveConnections
+			item.Active = &active
+			item.ActiveConnections = &connections
+			item.Activity = &viewLinkActivityDocument{
+				BytesInputToOutput: metrics.BytesInputToOutput,
+				BytesOutputToInput: metrics.BytesOutputToInput,
+			}
+		}
+		document.Links = append(document.Links, item)
 	}
 	sortViewLinks(document.Links)
 	return document

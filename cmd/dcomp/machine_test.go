@@ -7,6 +7,7 @@ import (
 
 	"github.com/glguida/dcomp/engine"
 	"github.com/glguida/dcomp/lifecycle"
+	"github.com/glguida/dcomp/proxy"
 )
 
 func TestWriteVersionJSONIsStableAndSelfDescribing(t *testing.T) {
@@ -51,6 +52,12 @@ func TestWriteStatusJSONReportsEffectivePublishedPorts(t *testing.T) {
 		Proxy: lifecycle.ProxyStatus{
 			InstanceID: "proxy-id", Digest: "sha256:proxy", PID: 123,
 			Ready: true, Inputs: 1, Outputs: 1, ActiveConnections: 2,
+			Links: []proxy.LinkMetrics{{
+				InputComponent: "service", InputEndpoint: "upstream",
+				OutputComponent: "source", OutputEndpoint: "echo",
+				ActiveConnections: 2, BytesInputToOutput: 120,
+				BytesOutputToInput: 240,
+			}},
 		},
 		Networks: []lifecycle.NetworkStatus{{
 			Key: "component/service", ID: "network-id", Internal: false,
@@ -73,7 +80,12 @@ func TestWriteStatusJSONReportsEffectivePublishedPorts(t *testing.T) {
 		"\"operational\":true,\"digest\":\"sha256:system\",\"operation\":\"\"," +
 		"\"phase\":\"\",\"proxy\":{\"instance_id\":\"proxy-id\"," +
 		"\"digest\":\"sha256:proxy\",\"pid\":123,\"ready\":true," +
-		"\"inputs\":1,\"outputs\":1,\"active_connections\":2,\"problem\":\"\"}," +
+		"\"inputs\":1,\"outputs\":1,\"active_connections\":2," +
+		"\"links\":[{\"input_component\":\"service\"," +
+		"\"input_endpoint\":\"upstream\",\"output_component\":\"source\"," +
+		"\"output_endpoint\":\"echo\",\"active_connections\":2," +
+		"\"bytes_input_to_output\":120,\"bytes_output_to_input\":240}]," +
+		"\"problem\":\"\"}," +
 		"\"networks\":[{\"key\":\"component/service\"," +
 		"\"id\":\"network-id\",\"internal\":false,\"problem\":\"\"}]," +
 		"\"components\":[{\"name\":\"service\",\"container_id\":\"container-id\"," +

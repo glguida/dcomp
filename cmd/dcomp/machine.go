@@ -6,6 +6,7 @@ import (
 	"io"
 
 	"github.com/glguida/dcomp/lifecycle"
+	"github.com/glguida/dcomp/proxy"
 )
 
 const (
@@ -34,14 +35,15 @@ type statusDocument struct {
 }
 
 type proxyStatusDocument struct {
-	InstanceID        string `json:"instance_id"`
-	Digest            string `json:"digest"`
-	PID               int    `json:"pid"`
-	Ready             bool   `json:"ready"`
-	Inputs            int    `json:"inputs"`
-	Outputs           int    `json:"outputs"`
-	ActiveConnections int64  `json:"active_connections"`
-	Problem           string `json:"problem"`
+	InstanceID        string              `json:"instance_id"`
+	Digest            string              `json:"digest"`
+	PID               int                 `json:"pid"`
+	Ready             bool                `json:"ready"`
+	Inputs            int                 `json:"inputs"`
+	Outputs           int                 `json:"outputs"`
+	ActiveConnections int64               `json:"active_connections"`
+	Links             []proxy.LinkMetrics `json:"links,omitempty"`
+	Problem           string              `json:"problem"`
 }
 
 type volumeDocument struct {
@@ -121,6 +123,7 @@ func writeStatusJSON(output io.Writer, status lifecycle.Status) error {
 			Inputs:            status.Proxy.Inputs,
 			Outputs:           status.Proxy.Outputs,
 			ActiveConnections: status.Proxy.ActiveConnections,
+			Links:             append([]proxy.LinkMetrics(nil), status.Proxy.Links...),
 			Problem:           status.Proxy.Problem,
 		},
 		Networks:   make([]networkStatusDocument, 0, len(status.Networks)),

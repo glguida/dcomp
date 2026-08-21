@@ -36,6 +36,7 @@ type ProxyStatus struct {
 	Inputs            int
 	Outputs           int
 	ActiveConnections int64
+	Links             []proxy.LinkMetrics
 	Problem           string
 }
 
@@ -336,6 +337,7 @@ func (controller *Controller) observeStatusResources(
 			result.Proxy.Inputs = status.Inputs
 			result.Proxy.Outputs = status.Outputs
 			result.Proxy.ActiveConnections = status.ActiveConnections
+			result.Proxy.Links = append([]proxy.LinkMetrics(nil), status.Links...)
 		}
 	}
 	expectedRuntimeDir := runtimeDirectory(runtimeRoot, spec.Name)

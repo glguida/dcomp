@@ -10,6 +10,7 @@ import (
 	"github.com/glguida/dcomp/composition"
 	"github.com/glguida/dcomp/engine"
 	"github.com/glguida/dcomp/lifecycle"
+	"github.com/glguida/dcomp/proxy"
 )
 
 func writeViewFixture(t *testing.T) string {
@@ -82,6 +83,9 @@ func TestViewFileModeEmitsTopologyWithoutDocker(t *testing.T) {
 	if link.Service != "example.document.v1.Documents" ||
 		link.Input.Component != "filter" || link.Output.Component != "source" {
 		t.Fatalf("link = %+v", link)
+	}
+	if link.Active != nil || link.ActiveConnections != nil || link.Activity != nil {
+		t.Fatalf("file mode invented runtime link facts: %+v", link)
 	}
 }
 
@@ -160,6 +164,12 @@ func TestViewFromStatusJoinsTopologyAndObservation(t *testing.T) {
 		Spec:    &spec,
 		Proxy: lifecycle.ProxyStatus{
 			Ready: true, Inputs: 1, Outputs: 2, ActiveConnections: 3,
+			Links: []proxy.LinkMetrics{{
+				InputComponent: "filter", InputEndpoint: "documents",
+				OutputComponent: "source", OutputEndpoint: "documents",
+				ActiveConnections:  1,
+				BytesInputToOutput: 125, BytesOutputToInput: 250,
+			}},
 		},
 		Components: []lifecycle.ComponentStatus{
 			{Name: "filter", ID: "c1", Status: "running", Health: engine.HealthHealthy},
@@ -193,6 +203,13 @@ func TestViewFromStatusJoinsTopologyAndObservation(t *testing.T) {
 	if len(document.Links) != 1 ||
 		document.Links[0].Service != "example.document.v1.Documents" {
 		t.Fatalf("links = %+v", document.Links)
+	}
+	link := document.Links[0]
+	if link.Active == nil || !*link.Active ||
+		link.ActiveConnections == nil || *link.ActiveConnections != 1 ||
+		link.Activity == nil || link.Activity.BytesInputToOutput != 125 ||
+		link.Activity.BytesOutputToInput != 250 {
+		t.Fatalf("link observation = %+v", link)
 	}
 }
 

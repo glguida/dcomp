@@ -30,18 +30,33 @@ type ControlRequest struct {
 }
 
 type Status struct {
-	Version           int    `json:"version"`
-	System            string `json:"system"`
-	InstanceID        string `json:"instance_id"`
-	Digest            string `json:"digest"`
-	PID               int    `json:"pid"`
-	Ready             bool   `json:"ready"`
-	Inputs            int    `json:"inputs"`
-	Outputs           int    `json:"outputs"`
-	ActiveConnections int64  `json:"active_connections"`
-	PendingInputs     int64  `json:"pending_inputs"`
-	PendingOutputs    int64  `json:"pending_outputs"`
-	Error             string `json:"error,omitempty"`
+	Version           int           `json:"version"`
+	System            string        `json:"system"`
+	InstanceID        string        `json:"instance_id"`
+	Digest            string        `json:"digest"`
+	PID               int           `json:"pid"`
+	Ready             bool          `json:"ready"`
+	Inputs            int           `json:"inputs"`
+	Outputs           int           `json:"outputs"`
+	ActiveConnections int64         `json:"active_connections"`
+	PendingInputs     int64         `json:"pending_inputs"`
+	PendingOutputs    int64         `json:"pending_outputs"`
+	Links             []LinkMetrics `json:"links"`
+	Error             string        `json:"error,omitempty"`
+}
+
+// LinkMetrics is one cumulative, per-link data-plane snapshot. Connections
+// is a gauge; byte counters increase for the lifetime of the proxy process.
+// The direction names follow the component contract: input is the consuming
+// side and output is the providing side.
+type LinkMetrics struct {
+	InputComponent     string `json:"input_component"`
+	InputEndpoint      string `json:"input_endpoint"`
+	OutputComponent    string `json:"output_component"`
+	OutputEndpoint     string `json:"output_endpoint"`
+	ActiveConnections  int64  `json:"active_connections"`
+	BytesInputToOutput uint64 `json:"bytes_input_to_output"`
+	BytesOutputToInput uint64 `json:"bytes_output_to_input"`
 }
 
 // Run owns all configured listeners until ctx is cancelled or a listener
@@ -56,6 +71,7 @@ func Run(ctx context.Context, config Config, ready func(Status) error) error {
 	server := &server{
 		config:      config,
 		outputs:     make(map[string]chan net.Conn),
+		linkMetrics: make(map[string]*linkCounters),
 		connections: make(map[net.Conn]struct{}),
 	}
 	runCtx, cancel := context.WithCancel(ctx)
@@ -110,6 +126,7 @@ type server struct {
 	control      net.Listener
 	outputs      map[string]chan net.Conn
 	routes       map[string]string
+	linkMetrics  map[string]*linkCounters
 	connections  map[net.Conn]struct{}
 	ownedPaths   []string
 	failures     chan error
@@ -120,6 +137,12 @@ type server struct {
 	active         atomic.Int64
 	pendingInputs  atomic.Int64
 	pendingOutputs atomic.Int64
+}
+
+type linkCounters struct {
+	active             atomic.Int64
+	bytesInputToOutput atomic.Uint64
+	bytesOutputToInput atomic.Uint64
 }
 
 func (server *server) prepare() error {
@@ -163,6 +186,7 @@ func (server *server) prepare() error {
 		input := endpointKey(DirectionInput, link.InputComponent, link.InputEndpoint)
 		output := endpointKey(DirectionOutput, link.OutputComponent, link.OutputEndpoint)
 		server.routes[input] = output
+		server.linkMetrics[input] = &linkCounters{}
 	}
 	pidPath := filepath.Join(server.config.RuntimeDir, PIDFileName)
 	if err := writeAtomic(pidPath, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0600); err != nil {
@@ -352,8 +376,13 @@ func (server *server) acceptInputs(ctx context.Context, endpoint Endpoint) {
 }
 
 func (server *server) forward(ctx context.Context, inputKey, outputKey string, consumer, producer net.Conn) {
+	metrics := server.linkMetrics[inputKey]
 	server.active.Add(1)
 	defer server.active.Add(-1)
+	if metrics != nil {
+		metrics.active.Add(1)
+		defer metrics.active.Add(-1)
+	}
 	defer server.untrackAndClose(consumer)
 	defer server.untrackAndClose(producer)
 	log.Printf("connection paired input=%s output=%s", inputKey, outputKey)
@@ -363,15 +392,29 @@ func (server *server) forward(ctx context.Context, inputKey, outputKey string, c
 		err       error
 	}
 	done := make(chan copyResult, 2)
-	copyOneWay := func(direction string, destination, source net.Conn) {
-		_, copyErr := io.Copy(destination, source)
+	copyOneWay := func(
+		direction string,
+		destination,
+		source net.Conn,
+		counter *atomic.Uint64,
+	) {
+		writer := io.Writer(destination)
+		if counter != nil {
+			writer = &countingWriter{writer: destination, counter: counter}
+		}
+		_, copyErr := io.Copy(writer, source)
 		if closer, ok := destination.(interface{ CloseWrite() error }); ok {
 			_ = closer.CloseWrite()
 		}
 		done <- copyResult{direction: direction, err: copyErr}
 	}
-	go copyOneWay("output-to-input", consumer, producer)
-	go copyOneWay("input-to-output", producer, consumer)
+	var inputToOutput, outputToInput *atomic.Uint64
+	if metrics != nil {
+		inputToOutput = &metrics.bytesInputToOutput
+		outputToInput = &metrics.bytesOutputToInput
+	}
+	go copyOneWay("output-to-input", consumer, producer, outputToInput)
+	go copyOneWay("input-to-output", producer, consumer, inputToOutput)
 	var results []copyResult
 	select {
 	case <-ctx.Done():
@@ -406,6 +449,17 @@ func (server *server) forward(ctx context.Context, inputKey, outputKey string, c
 		)
 	}
 	log.Printf("connection closed input=%s output=%s", inputKey, outputKey)
+}
+
+type countingWriter struct {
+	writer  io.Writer
+	counter *atomic.Uint64
+}
+
+func (writer *countingWriter) Write(buffer []byte) (int, error) {
+	written, err := writer.writer.Write(buffer)
+	writer.counter.Add(uint64(written))
+	return written, err
 }
 
 func (server *server) acceptControl(ctx context.Context) {
@@ -459,12 +513,28 @@ func (server *server) status() Status {
 			outputs++
 		}
 	}
+	links := make([]LinkMetrics, 0, len(server.config.Links))
+	for _, link := range server.config.Links {
+		key := endpointKey(DirectionInput, link.InputComponent, link.InputEndpoint)
+		metrics := server.linkMetrics[key]
+		item := LinkMetrics{
+			InputComponent: link.InputComponent, InputEndpoint: link.InputEndpoint,
+			OutputComponent: link.OutputComponent, OutputEndpoint: link.OutputEndpoint,
+		}
+		if metrics != nil {
+			item.ActiveConnections = metrics.active.Load()
+			item.BytesInputToOutput = metrics.bytesInputToOutput.Load()
+			item.BytesOutputToInput = metrics.bytesOutputToInput.Load()
+		}
+		links = append(links, item)
+	}
 	return Status{
 		Version: ConfigVersion, System: server.config.System,
 		InstanceID: server.config.InstanceID, Digest: server.config.Digest,
 		PID: os.Getpid(), Ready: true, Inputs: inputs, Outputs: outputs,
 		ActiveConnections: server.active.Load(),
 		PendingInputs:     server.pendingInputs.Load(), PendingOutputs: server.pendingOutputs.Load(),
+		Links: links,
 	}
 }
 

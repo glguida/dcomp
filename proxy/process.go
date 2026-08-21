@@ -348,9 +348,13 @@ func (manager *ProcessManager) Stop(ctx context.Context, process Process) error 
 		if errors.Is(inspectErr, ErrNotRunning) {
 			return cleanupRuntime(process)
 		}
-		if inspectErr != nil && stopCtx.Err() == nil {
+		if errors.Is(inspectErr, ErrIdentityMismatch) && stopCtx.Err() == nil {
 			return inspectErr
 		}
+		// Closing a Unix listener can reset an already accepted status request.
+		// After an identity-checked shutdown response this is a transient exit
+		// state, not evidence that the recorded process changed. Keep polling
+		// until the socket is gone or the bounded stop context expires.
 		select {
 		case <-stopCtx.Done():
 			// The instance was verified immediately before shutdown. Signal only
@@ -465,7 +469,10 @@ func verifyStatus(process Process, status Status) error {
 		}
 		return fmt.Errorf("proxy control error: %s", status.Error)
 	}
-	if status.Version != ConfigVersion {
+	// Status version 1 is the deployed 0.2 proxy protocol. Version 2 adds only
+	// optional per-link metrics, so a newer orchestrator can still identify and
+	// gracefully stop a recorded v1 process while replacing it.
+	if status.Version < 1 || status.Version > ConfigVersion {
 		return fmt.Errorf("unsupported proxy status version %d", status.Version)
 	}
 	if status.InstanceID != process.InstanceID || status.Digest != process.Digest {

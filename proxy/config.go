@@ -17,7 +17,7 @@ import (
 	"github.com/glguida/dcomp/composition"
 )
 
-const ConfigVersion = 1
+const ConfigVersion = 2
 
 func DefaultRuntimeRoot(stateRoot string) (string, error) {
 	if root := os.Getenv("DCOMP_RUNTIME_ROOT"); root != "" {
@@ -159,7 +159,11 @@ func LoadConfig(data []byte) (Config, error) {
 }
 
 func (config Config) Validate() error {
-	if config.Version != ConfigVersion {
+	// Version 2 changes only the proxy status surface. The wiring schema is
+	// unchanged, so version-1 files remain readable for verified cleanup and
+	// upgrade recovery. New configurations are always emitted at the current
+	// version.
+	if config.Version < 1 || config.Version > ConfigVersion {
 		return fmt.Errorf("unsupported proxy config version %d", config.Version)
 	}
 	if !composition.ValidName(config.System) {

@@ -31,6 +31,21 @@ func TestParseProxyLogLineUsesWrittenTimestamp(t *testing.T) {
 	}
 }
 
+func TestVerifyStatusAcceptsRecordedVersionOneProxyForUpgrade(t *testing.T) {
+	process := Process{InstanceID: "recorded", Digest: "sha256:wiring"}
+	status := Status{
+		Version: 1, InstanceID: process.InstanceID, Digest: process.Digest,
+		Ready: true,
+	}
+	if err := verifyStatus(process, status); err != nil {
+		t.Fatalf("verify v1 status: %v", err)
+	}
+	status.Version = ConfigVersion + 1
+	if err := verifyStatus(process, status); err == nil {
+		t.Fatal("future proxy status version was accepted")
+	}
+}
+
 func TestTerminateStartedCommandEscalatesAndReturns(t *testing.T) {
 	command := exec.Command(os.Args[0], "-test.run=^TestProxyTerminationHelperProcess$")
 	command.Env = append(os.Environ(), "DCOMP_PROXY_TEST_IGNORE_TERM=1")
