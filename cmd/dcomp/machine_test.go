@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"testing"
 
 	"github.com/glguida/dcomp/engine"
@@ -16,6 +17,31 @@ func TestWriteVersionJSONIsStableAndSelfDescribing(t *testing.T) {
 	const want = "{\"version\":\"0.2.0\",\"api_version\":2}\n"
 	if got := output.String(); got != want {
 		t.Fatalf("version JSON = %q, want %q", got, want)
+	}
+}
+
+func TestWriteStatusJSONIncludesRetiringResources(t *testing.T) {
+	status := lifecycle.Status{
+		Name: "demo", Operation: "apply", Phase: "retire",
+		RetiringNetworks: []lifecycle.NetworkStatus{{
+			Key: "component/worker", ID: "old-network",
+		}},
+		RetiringComponents: []lifecycle.ComponentStatus{{
+			Name: "worker", ID: "old-container", Status: "exited",
+		}},
+	}
+	var output bytes.Buffer
+	if err := writeStatusJSON(&output, status); err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(output.Bytes(), &document); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"retiring_networks", "retiring_components"} {
+		if string(document[field]) == "" || string(document[field]) == "[]" {
+			t.Fatalf("status JSON omitted %s: %s", field, output.String())
+		}
 	}
 }
 

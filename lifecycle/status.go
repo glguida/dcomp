@@ -40,14 +40,16 @@ type ProxyStatus struct {
 }
 
 type Status struct {
-	Name       string
-	Desired    bool
-	Digest     string
-	Operation  string
-	Phase      string
-	Proxy      ProxyStatus
-	Networks   []NetworkStatus
-	Components []ComponentStatus
+	Name               string
+	Desired            bool
+	Digest             string
+	Operation          string
+	Phase              string
+	Proxy              ProxyStatus
+	Networks           []NetworkStatus
+	Components         []ComponentStatus
+	RetiringNetworks   []NetworkStatus
+	RetiringComponents []ComponentStatus
 }
 
 type ComponentProcess struct {
@@ -158,6 +160,7 @@ func (controller *Controller) Status(ctx context.Context, name string) (Status, 
 			operation.RuntimeRoot,
 			false,
 		)
+		controller.observeRetiringResources(ctx, &result, operation)
 		return result, nil
 	}
 	desired, desiredExists, err := controller.State.ReadDesired(name)
@@ -183,6 +186,121 @@ func (controller *Controller) Status(ctx context.Context, name string) (Status, 
 		true,
 	)
 	return result, nil
+}
+
+func (controller *Controller) observeRetiringResources(
+	ctx context.Context,
+	result *Status,
+	operation state.Operation,
+) {
+	if operation.Previous == nil || operation.Kind != kindApply {
+		return
+	}
+	previous := *operation.Previous
+	plans, err := resolvedTopology(previous.Spec)
+	if err != nil {
+		result.RetiringNetworks = append(result.RetiringNetworks, NetworkStatus{
+			Key: "topology", Problem: err.Error(),
+		})
+		return
+	}
+	for _, component := range previous.Spec.Components {
+		resource, exists := previous.Containers[component.Name]
+		if !exists || resource.ID == "" {
+			continue
+		}
+		if retained, exists := operation.Containers[component.Name]; exists &&
+			retained.ID == resource.ID {
+			continue
+		}
+		status := controller.observeComponent(
+			ctx,
+			previous.Spec,
+			plans,
+			previous.Networks,
+			component,
+			previous.Proxy.RuntimeDir,
+			resource,
+			true,
+		)
+		awaitingEndpoint := controller.previousEndpointAwaitsCleanup(
+			ctx,
+			operation,
+			component,
+			resource,
+			previous.Networks,
+		)
+		if status.Status != "missing" || awaitingEndpoint {
+			if status.Status == "missing" && awaitingEndpoint {
+				status.Problem = "recorded container is absent; network endpoint awaits cleanup"
+			}
+			result.RetiringComponents = append(result.RetiringComponents, status)
+		}
+	}
+	for _, key := range sortedNetworkKeys(plans) {
+		resource, exists := previous.Networks[key]
+		if !exists || resource.ID == "" {
+			continue
+		}
+		if retained, exists := operation.Networks[key]; exists &&
+			retained.ID == resource.ID {
+			continue
+		}
+		actual, inspectErr := controller.inspectNetwork(ctx, resource.ID)
+		if errors.Is(inspectErr, engine.ErrNotFound) {
+			continue
+		}
+		status := NetworkStatus{
+			Key: key, ID: resource.ID, Internal: plans[key].Internal,
+		}
+		if inspectErr != nil {
+			status.Problem = inspectErr.Error()
+		} else if err := verifyNetwork(
+			previous.Spec.Name,
+			plans[key],
+			resource,
+			actual,
+		); err != nil {
+			status.Problem = err.Error()
+		}
+		result.RetiringNetworks = append(result.RetiringNetworks, status)
+	}
+}
+
+func (controller *Controller) previousEndpointAwaitsCleanup(
+	ctx context.Context,
+	operation state.Operation,
+	component composition.ResolvedComponent,
+	container state.Resource,
+	networks map[string]state.Resource,
+) bool {
+	for _, cleanup := range operation.EndpointCleanups {
+		if cleanup.ContainerID == container.ID {
+			return true
+		}
+	}
+	if !component.Runtime.ExternalEgress {
+		return false
+	}
+	network, exists := networks[componentNetworkKey(component.Name)]
+	if !exists {
+		return false
+	}
+	actual, err := controller.inspectNetwork(ctx, network.ID)
+	if errors.Is(err, engine.ErrNotFound) {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	for _, endpoint := range actual.Endpoints {
+		if endpoint.Name == container.Name &&
+			endpoint.EndpointID != "" &&
+			endpoint.Key == "ep-"+endpoint.EndpointID {
+			return true
+		}
+	}
+	return false
 }
 
 func (controller *Controller) observeStatusResources(

@@ -421,7 +421,10 @@ func verifyNetworkMembers(
 		}
 		expected = append(expected, resource.ID)
 	}
-	actual := append([]string(nil), network.Containers...)
+	actual := make([]string, 0, len(network.Endpoints))
+	for _, endpoint := range network.Endpoints {
+		actual = append(actual, endpoint.Key)
+	}
 	sort.Strings(expected)
 	sort.Strings(actual)
 	if !reflect.DeepEqual(actual, expected) {
@@ -429,6 +432,15 @@ func verifyNetworkMembers(
 			"network %s has unexpected members",
 			plan.Key,
 		)
+	}
+	known := make(map[string]state.Resource, len(containers))
+	for _, resource := range containers {
+		known[resource.ID] = resource
+	}
+	for _, endpoint := range network.Endpoints {
+		if err := verifyNetworkEndpointIdentity(plan, endpoint, known[endpoint.Key]); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -441,18 +453,37 @@ func verifyNoUnknownNetworkMembers(
 	network engine.Network,
 	containers map[string]state.Resource,
 ) error {
-	known := make(map[string]struct{}, len(containers))
+	known := make(map[string]state.Resource, len(containers))
 	for _, resource := range containers {
-		known[resource.ID] = struct{}{}
+		known[resource.ID] = resource
 	}
-	for _, id := range network.Containers {
-		if _, exists := known[id]; !exists {
+	for _, endpoint := range network.Endpoints {
+		resource, exists := known[endpoint.Key]
+		if !exists {
 			return fmt.Errorf(
 				"network %s has undeclared member %s",
 				plan.Key,
-				id,
+				endpoint.Key,
 			)
 		}
+		if err := verifyNetworkEndpointIdentity(plan, endpoint, resource); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func verifyNetworkEndpointIdentity(
+	plan networkPlan,
+	endpoint engine.NetworkEndpoint,
+	container state.Resource,
+) error {
+	if endpoint.Name != container.Name || endpoint.EndpointID == "" {
+		return fmt.Errorf(
+			"network %s member %s has unexpected endpoint identity",
+			plan.Key,
+			endpoint.Key,
+		)
 	}
 	return nil
 }

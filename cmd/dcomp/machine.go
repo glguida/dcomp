@@ -19,16 +19,18 @@ type versionDocument struct {
 }
 
 type statusDocument struct {
-	APIVersion  int                       `json:"api_version"`
-	Name        string                    `json:"name"`
-	Desired     bool                      `json:"desired"`
-	Operational bool                      `json:"operational"`
-	Digest      string                    `json:"digest"`
-	Operation   string                    `json:"operation"`
-	Phase       string                    `json:"phase"`
-	Proxy       proxyStatusDocument       `json:"proxy"`
-	Networks    []networkStatusDocument   `json:"networks"`
-	Components  []componentStatusDocument `json:"components"`
+	APIVersion         int                       `json:"api_version"`
+	Name               string                    `json:"name"`
+	Desired            bool                      `json:"desired"`
+	Operational        bool                      `json:"operational"`
+	Digest             string                    `json:"digest"`
+	Operation          string                    `json:"operation"`
+	Phase              string                    `json:"phase"`
+	Proxy              proxyStatusDocument       `json:"proxy"`
+	Networks           []networkStatusDocument   `json:"networks"`
+	Components         []componentStatusDocument `json:"components"`
+	RetiringNetworks   []networkStatusDocument   `json:"retiring_networks,omitempty"`
+	RetiringComponents []componentStatusDocument `json:"retiring_components,omitempty"`
 }
 
 type proxyStatusDocument struct {
@@ -131,23 +133,42 @@ func writeStatusJSON(output io.Writer, status lifecycle.Status) error {
 		})
 	}
 	for _, component := range status.Components {
-		item := componentStatusDocument{
-			Name: component.Name, ContainerID: component.ID,
-			Status: component.Status, Health: string(component.Health),
-			ExitCode: component.ExitCode, Problem: component.Problem,
-			PublishedPorts: make(
-				[]publishedPortDocument, 0, len(component.PublishedPorts),
-			),
-		}
-		for _, published := range component.PublishedPorts {
-			item.PublishedPorts = append(item.PublishedPorts, publishedPortDocument{
-				Protocol: string(published.Protocol), HostIP: published.HostIP,
-				HostPort: published.HostPort, ContainerPort: published.ContainerPort,
-			})
-		}
-		document.Components = append(document.Components, item)
+		document.Components = append(document.Components, componentStatusJSON(component))
+	}
+	for _, network := range status.RetiringNetworks {
+		document.RetiringNetworks = append(
+			document.RetiringNetworks,
+			networkStatusDocument{
+				Key: network.Key, ID: network.ID,
+				Internal: network.Internal, Problem: network.Problem,
+			},
+		)
+	}
+	for _, component := range status.RetiringComponents {
+		document.RetiringComponents = append(
+			document.RetiringComponents,
+			componentStatusJSON(component),
+		)
 	}
 	return writeDocument(output, document)
+}
+
+func componentStatusJSON(component lifecycle.ComponentStatus) componentStatusDocument {
+	item := componentStatusDocument{
+		Name: component.Name, ContainerID: component.ID,
+		Status: component.Status, Health: string(component.Health),
+		ExitCode: component.ExitCode, Problem: component.Problem,
+		PublishedPorts: make(
+			[]publishedPortDocument, 0, len(component.PublishedPorts),
+		),
+	}
+	for _, published := range component.PublishedPorts {
+		item.PublishedPorts = append(item.PublishedPorts, publishedPortDocument{
+			Protocol: string(published.Protocol), HostIP: published.HostIP,
+			HostPort: published.HostPort, ContainerPort: published.ContainerPort,
+		})
+	}
+	return item
 }
 
 func writeProcessesJSON(

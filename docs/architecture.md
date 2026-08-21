@@ -152,17 +152,21 @@ contains its instance ID, PID, wiring digest, runtime directory, control
 socket, and log path. DComp never signals a PID until the live control socket
 has confirmed the same instance and PID.
 
-Operation intent and pending creates are written before mutation. A lost
-Docker response is recovered by inspecting the operation-owned name. A proxy
-start lost before state publication is recovered by its configuration and
+Operation intent, pending creates, and egress endpoint cleanup identities are
+written before mutation. A lost Docker response is recovered by inspecting
+the operation-owned name. Container removal is not checkpointed until network
+inspection proves its exact endpoint absent; a stranded endpoint is removed
+only after the recorded container ID and name are both absent. A proxy start
+lost before state publication is recovered by its configuration and
 identity-checked control socket. See [Lifecycle](lifecycle.md).
 
 ## Observation
 
 `status` observes one coherent state generation under a shared lock and
-reports proxy, network, and component health. `logs` concurrently merges
-Docker logs with `proxy.log`; proxy records use the source name `@proxy`.
-Observation never repairs resources.
+reports proxy, network, and component health, including previous-generation
+resources still awaiting retirement. `logs` concurrently merges Docker logs
+with `proxy.log`; proxy records use the source name `@proxy`. Observation
+never repairs resources.
 
 ## Trust boundary and limits
 

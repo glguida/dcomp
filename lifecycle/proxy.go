@@ -208,6 +208,20 @@ func (controller *Controller) removeContainersWithStaleProxyMounts(
 				return inspectErr
 			}
 			if inspectErr == nil {
+				if err := controller.prepareEndpointCleanup(
+					ctx,
+					operation,
+					operation.Target,
+					operation.Networks,
+					component,
+					resource,
+				); err != nil {
+					return fmt.Errorf(
+						"record %s endpoint cleanup after proxy loss: %w",
+						component.Name,
+						err,
+					)
+				}
 				if actual.Running {
 					callCtx, cancel := controller.callContext(ctx)
 					err := controller.Engine.StopContainer(
@@ -230,6 +244,13 @@ func (controller *Controller) removeContainersWithStaleProxyMounts(
 				if err != nil && !errors.Is(err, engine.ErrNotFound) {
 					return fmt.Errorf(
 						"remove %s after proxy loss: %w",
+						component.Name,
+						err,
+					)
+				}
+				if err := controller.recoverEndpointCleanups(ctx, operation); err != nil {
+					return fmt.Errorf(
+						"verify %s endpoint cleanup after proxy loss: %w",
 						component.Name,
 						err,
 					)

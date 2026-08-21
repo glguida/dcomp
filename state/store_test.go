@@ -241,3 +241,34 @@ func TestNewOperationRequiresValidRuntimeRoot(t *testing.T) {
 		t.Fatalf("runtime root = %q, want %q", operation.RuntimeRoot, root)
 	}
 }
+
+func TestOperationRoundTripsEndpointCleanupJournal(t *testing.T) {
+	store := Store{Root: t.TempDir()}
+	operation, err := NewOperation(
+		"apply",
+		"retire",
+		composition.ResolvedSpec{Name: "demo", Digest: "sha256:test"},
+		nil,
+		t.TempDir(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanup := EndpointCleanup{
+		ContainerID: "container-id", ContainerName: "dcomp.demo.container.worker",
+		NetworkKey: "component/worker", NetworkID: "network-id",
+		NetworkName: "dcomp.demo.component.worker", EndpointID: "endpoint-id",
+		EndpointName: "dcomp.demo.container.worker",
+	}
+	operation.EndpointCleanups[cleanup.EndpointID] = cleanup
+	if err := store.WriteOperation("demo", operation); err != nil {
+		t.Fatal(err)
+	}
+	read, exists, err := store.ReadOperation("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exists || !reflect.DeepEqual(read.EndpointCleanups, operation.EndpointCleanups) {
+		t.Fatalf("endpoint cleanup round trip = %#v", read.EndpointCleanups)
+	}
+}

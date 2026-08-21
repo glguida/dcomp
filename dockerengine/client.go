@@ -117,25 +117,35 @@ func (client *Client) ResolveImage(ctx context.Context, reference string) (engin
 }
 
 func (client *Client) InspectNetwork(ctx context.Context, idOrName string) (engine.Network, error) {
+	type endpoint struct {
+		Name       string `json:"Name"`
+		EndpointID string `json:"EndpointID"`
+	}
 	var raw struct {
-		ID         string                     `json:"Id"`
-		Name       string                     `json:"Name"`
-		Driver     string                     `json:"Driver"`
-		Internal   bool                       `json:"Internal"`
-		Labels     map[string]string          `json:"Labels"`
-		Containers map[string]json.RawMessage `json:"Containers"`
+		ID         string              `json:"Id"`
+		Name       string              `json:"Name"`
+		Driver     string              `json:"Driver"`
+		Internal   bool                `json:"Internal"`
+		Labels     map[string]string   `json:"Labels"`
+		Containers map[string]endpoint `json:"Containers"`
 	}
 	if err := client.do(ctx, http.MethodGet, "/networks/"+url.PathEscape(idOrName), nil, &raw); err != nil {
 		return engine.Network{}, err
 	}
-	containers := make([]string, 0, len(raw.Containers))
-	for id := range raw.Containers {
-		containers = append(containers, id)
+	endpoints := make([]engine.NetworkEndpoint, 0, len(raw.Containers))
+	for key, rawEndpoint := range raw.Containers {
+		endpoints = append(endpoints, engine.NetworkEndpoint{
+			Key:        key,
+			Name:       rawEndpoint.Name,
+			EndpointID: rawEndpoint.EndpointID,
+		})
 	}
-	sort.Strings(containers)
+	sort.Slice(endpoints, func(i, j int) bool {
+		return endpoints[i].Key < endpoints[j].Key
+	})
 	return engine.Network{
 		ID: raw.ID, Name: raw.Name, Driver: raw.Driver, Internal: raw.Internal,
-		Labels: cloneMap(raw.Labels), Containers: containers,
+		Labels: cloneMap(raw.Labels), Endpoints: endpoints,
 	}, nil
 }
 
@@ -464,11 +474,23 @@ func (client *Client) ConnectNetwork(
 func (client *Client) DisconnectNetwork(
 	ctx context.Context, networkID, containerID string,
 ) error {
+	return client.disconnectNetwork(ctx, networkID, containerID, false)
+}
+
+func (client *Client) ForceDisconnectNetworkEndpoint(
+	ctx context.Context, networkID, endpointName string,
+) error {
+	return client.disconnectNetwork(ctx, networkID, endpointName, true)
+}
+
+func (client *Client) disconnectNetwork(
+	ctx context.Context, networkID, target string, force bool,
+) error {
 	body := struct {
 		Container string `json:"Container"`
 		Force     bool   `json:"Force"`
 	}{
-		Container: containerID, Force: false,
+		Container: target, Force: force,
 	}
 	return client.do(
 		ctx, http.MethodPost, "/networks/"+url.PathEscape(networkID)+"/disconnect", body, nil,

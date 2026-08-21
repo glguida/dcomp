@@ -316,7 +316,9 @@ func TestCreateNetworkUsesPrivateBridgeAndInspectsImmutableID(t *testing.T) {
 				"Internal": true,
 				"Labels":   map[string]string{"io.dcomp.owner": "test"},
 				"Containers": map[string]interface{}{
-					"container-id": map[string]interface{}{"Name": "worker"},
+					"container-id": map[string]interface{}{
+						"Name": "worker", "EndpointID": "endpoint-id",
+					},
 				},
 			})
 		default:
@@ -350,8 +352,11 @@ func TestCreateNetworkUsesPrivateBridgeAndInspectsImmutableID(t *testing.T) {
 		network.Driver != "bridge" || !network.Internal {
 		t.Fatalf("unexpected inspected network: %#v", network)
 	}
-	if len(network.Containers) != 1 || network.Containers[0] != "container-id" {
-		t.Fatalf("unexpected network containers: %#v", network.Containers)
+	wantEndpoints := []engine.NetworkEndpoint{{
+		Key: "container-id", Name: "worker", EndpointID: "endpoint-id",
+	}}
+	if !reflect.DeepEqual(network.Endpoints, wantEndpoints) {
+		t.Fatalf("unexpected network endpoints: %#v", network.Endpoints)
 	}
 }
 
@@ -989,6 +994,11 @@ func TestConnectAndDisconnectNetworkUseExactImmutableIDs(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
+	if err := client.ForceDisconnectNetworkEndpoint(
+		context.Background(), networkID, "dcomp.demo.container.worker",
+	); err != nil {
+		t.Fatal(err)
+	}
 
 	want := []observedRequest{
 		{
@@ -1007,6 +1017,14 @@ func TestConnectAndDisconnectNetworkUseExactImmutableIDs(t *testing.T) {
 			Body: map[string]interface{}{
 				"Container": containerID,
 				"Force":     false,
+			},
+		},
+		{
+			Method: http.MethodPost,
+			URI:    "/v1.47/networks/sha256:network%2Fid/disconnect",
+			Body: map[string]interface{}{
+				"Container": "dcomp.demo.container.worker",
+				"Force":     true,
 			},
 		},
 	}

@@ -54,6 +54,11 @@ func (controller *Controller) executeAbort(
 	operation *state.Operation,
 ) error {
 	if operation.Kind != kindApply {
+		if operation.Kind == kindDown {
+			if err := controller.recoverRetiredPreviousEndpoints(ctx, operation); err != nil {
+				return fmt.Errorf("recover network endpoints before abort: %w", err)
+			}
+		}
 		if err := controller.State.ClearOperation(operation.Target.Name); err != nil {
 			return err
 		}
@@ -106,6 +111,37 @@ func (controller *Controller) executeAbort(
 			networkCandidates[key] = state.Resource{
 				ID: actual.ID, Name: actual.Name,
 			}
+		}
+	}
+	for _, component := range operation.Target.Components {
+		resource, exists := containerCandidates[component.Name]
+		if !exists {
+			continue
+		}
+		if _, retained := previousContainerIDs[resource.ID]; retained {
+			continue
+		}
+		if err := controller.recoverAbsentComponentEndpoint(
+			ctx,
+			operation,
+			operation.Target,
+			networkCandidates,
+			component,
+			resource,
+		); err != nil {
+			return fmt.Errorf("recover %s endpoint before abort: %w", component.Name, err)
+		}
+	}
+	for _, resource := range containerCandidates {
+		if _, retained := previousContainerIDs[resource.ID]; retained {
+			continue
+		}
+		if err := controller.recoverContainerEndpointCleanups(
+			ctx,
+			operation,
+			resource.ID,
+		); err != nil {
+			return fmt.Errorf("recover endpoint cleanup before abort: %w", err)
 		}
 	}
 
@@ -187,6 +223,20 @@ func (controller *Controller) executeAbort(
 		if inspectErr != nil {
 			return inspectErr
 		}
+		if err := controller.prepareEndpointCleanup(
+			ctx,
+			operation,
+			operation.Target,
+			networkCandidates,
+			component,
+			resource,
+		); err != nil {
+			return fmt.Errorf(
+				"record %s endpoint cleanup during abort: %w",
+				component.Name,
+				err,
+			)
+		}
 		if actual.Running {
 			callCtx, cancel := controller.callContext(ctx)
 			err := controller.Engine.StopContainer(
@@ -205,6 +255,23 @@ func (controller *Controller) executeAbort(
 		if err != nil && !errors.Is(err, engine.ErrNotFound) {
 			return fmt.Errorf("remove %s during abort: %w", component.Name, err)
 		}
+		if err := controller.recoverContainerEndpointCleanups(
+			ctx,
+			operation,
+			resource.ID,
+		); err != nil {
+			return fmt.Errorf(
+				"verify %s endpoint cleanup during abort: %w",
+				component.Name,
+				err,
+			)
+		}
+	}
+	// Target and previous generations can reuse a deterministic container
+	// name. Remove target-only containers first, then recover any previous
+	// orphan addressed by that name.
+	if err := controller.recoverRetiredPreviousEndpoints(ctx, operation); err != nil {
+		return fmt.Errorf("recover previous network endpoints during abort: %w", err)
 	}
 	if operation.Proxy != nil &&
 		(operation.Previous == nil || !proxyProcessMatches(operation.Proxy, operation.Previous.Proxy)) {
@@ -266,7 +333,7 @@ func (controller *Controller) executeAbort(
 		if inspectErr != nil {
 			return inspectErr
 		}
-		if len(actual.Containers) != 0 {
+		if len(actual.Endpoints) != 0 {
 			return fmt.Errorf(
 				"cannot abort network %s with attached containers",
 				key,
@@ -306,6 +373,9 @@ func (controller *Controller) executeDown(
 	if operation.Previous == nil {
 		return fmt.Errorf("down operation has no committed deployment")
 	}
+	if err := controller.recoverRetiredPreviousEndpoints(ctx, operation); err != nil {
+		return fmt.Errorf("recover network endpoints before down: %w", err)
+	}
 	if len(operation.Completed) == 0 {
 		if err := controller.preflightCommittedDeployment(
 			ctx,
@@ -322,6 +392,19 @@ func (controller *Controller) executeDown(
 		resource := operation.Containers[component.Name]
 		actual, inspectErr := controller.inspectContainer(ctx, resource.ID)
 		if errors.Is(inspectErr, engine.ErrNotFound) {
+			if err := controller.recoverAbsentComponentEndpoint(
+				ctx,
+				operation,
+				operation.Previous.Spec,
+				operation.Previous.Networks,
+				component,
+				resource,
+			); err != nil {
+				return err
+			}
+			if err := controller.recoverEndpointCleanups(ctx, operation); err != nil {
+				return err
+			}
 			if err := controller.markComplete(operation, key); err != nil {
 				return err
 			}
@@ -338,6 +421,16 @@ func (controller *Controller) executeDown(
 			actual,
 		); err != nil {
 			return err
+		}
+		if err := controller.prepareEndpointCleanup(
+			ctx,
+			operation,
+			operation.Previous.Spec,
+			operation.Previous.Networks,
+			component,
+			resource,
+		); err != nil {
+			return fmt.Errorf("record %s endpoint cleanup: %w", component.Name, err)
 		}
 		if actual.Running {
 			callCtx, cancel := controller.callContext(ctx)
@@ -356,6 +449,9 @@ func (controller *Controller) executeDown(
 		cancel()
 		if err != nil && !errors.Is(err, engine.ErrNotFound) {
 			return fmt.Errorf("remove %s: %w", component.Name, err)
+		}
+		if err := controller.recoverEndpointCleanups(ctx, operation); err != nil {
+			return fmt.Errorf("verify %s endpoint cleanup: %w", component.Name, err)
 		}
 		if err := controller.markComplete(operation, key); err != nil {
 			return err
@@ -398,7 +494,7 @@ func (controller *Controller) executeDown(
 		); err != nil {
 			return err
 		}
-		if len(actual.Containers) != 0 {
+		if len(actual.Endpoints) != 0 {
 			return fmt.Errorf("network %s still has attached containers", networkKey)
 		}
 		callCtx, cancel := controller.callContext(ctx)

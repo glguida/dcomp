@@ -1111,7 +1111,10 @@ func requireNetwork(t *testing.T, fake *fakeEngine, id string) engine.Network {
 
 func requireMembers(t *testing.T, network engine.Network, want ...string) {
 	t.Helper()
-	got := append([]string(nil), network.Containers...)
+	got := make([]string, 0, len(network.Endpoints))
+	for _, endpoint := range network.Endpoints {
+		got = append(got, endpoint.Key)
+	}
 	sort.Strings(got)
 	sort.Strings(want)
 	if !reflect.DeepEqual(got, want) {

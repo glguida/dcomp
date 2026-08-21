@@ -389,6 +389,44 @@ func printStatus(status lifecycle.Status) {
 			)
 		}
 	}
+	if len(status.RetiringNetworks) != 0 {
+		fmt.Println("RETIRING NETWORK\tPOLICY\tID\tPROBLEM")
+		for _, network := range status.RetiringNetworks {
+			id := network.ID
+			if len(id) > 12 {
+				id = id[:12]
+			}
+			policy := "egress"
+			if network.Internal {
+				policy = "internal"
+			}
+			fmt.Printf(
+				"%s\t%s\t%s\t%s\n",
+				network.Key,
+				policy,
+				id,
+				strings.ReplaceAll(network.Problem, "\n", " "),
+			)
+		}
+	}
+	if len(status.RetiringComponents) != 0 {
+		fmt.Println("RETIRING COMPONENT\tSTATUS\tHEALTH\tEXIT\tCONTAINER\tPROBLEM")
+		for _, component := range status.RetiringComponents {
+			containerID := component.ID
+			if len(containerID) > 12 {
+				containerID = containerID[:12]
+			}
+			fmt.Printf(
+				"%s\t%s\t%s\t%d\t%s\t%s\n",
+				component.Name,
+				component.Status,
+				component.Health,
+				component.ExitCode,
+				containerID,
+				strings.ReplaceAll(component.Problem, "\n", " "),
+			)
+		}
+	}
 	if len(status.Components) == 0 {
 		return
 	}

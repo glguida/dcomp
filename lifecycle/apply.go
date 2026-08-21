@@ -245,6 +245,11 @@ func (controller *Controller) executeApply(
 	ctx context.Context,
 	operation *state.Operation,
 ) error {
+	// This runs before the active phase's strict member preflight so operations
+	// written by the affected state format can recover their own ep-* member.
+	if err := controller.recoverRetiredPreviousEndpoints(ctx, operation); err != nil {
+		return fmt.Errorf("recover retired network endpoints: %w", err)
+	}
 	for {
 		if applyPhaseUsesProxy(operation.Phase) {
 			recovered, err := controller.recoverMissingTargetProxy(ctx, operation)
@@ -306,6 +311,12 @@ func (controller *Controller) executeApply(
 				return err
 			}
 		case phaseCommit:
+			if len(operation.EndpointCleanups) != 0 {
+				return fmt.Errorf(
+					"cannot commit %s with pending endpoint cleanup",
+					operation.Target.Name,
+				)
+			}
 			if operation.Proxy == nil {
 				return fmt.Errorf("cannot commit %s without a proxy", operation.Target.Name)
 			}
@@ -355,6 +366,19 @@ func (controller *Controller) retireChangedContainers(
 		}
 		actual, inspectErr := controller.inspectContainer(ctx, previousResource.ID)
 		if errors.Is(inspectErr, engine.ErrNotFound) {
+			if err := controller.recoverAbsentComponentEndpoint(
+				ctx,
+				operation,
+				operation.Previous.Spec,
+				operation.Previous.Networks,
+				component,
+				previousResource,
+			); err != nil {
+				return err
+			}
+			if err := controller.recoverEndpointCleanups(ctx, operation); err != nil {
+				return err
+			}
 			if err := controller.markComplete(operation, progressKey); err != nil {
 				return err
 			}
@@ -386,6 +410,16 @@ func (controller *Controller) retireChangedContainers(
 		); err != nil {
 			return err
 		}
+		if err := controller.prepareEndpointCleanup(
+			ctx,
+			operation,
+			operation.Previous.Spec,
+			operation.Previous.Networks,
+			component,
+			previousResource,
+		); err != nil {
+			return fmt.Errorf("record %s endpoint cleanup: %w", component.Name, err)
+		}
 		if actual.Running {
 			callCtx, cancel := controller.callContext(ctx)
 			err := controller.Engine.StopContainer(
@@ -403,6 +437,9 @@ func (controller *Controller) retireChangedContainers(
 		cancel()
 		if removeErr != nil && !errors.Is(removeErr, engine.ErrNotFound) {
 			return fmt.Errorf("remove %s: %w", component.Name, removeErr)
+		}
+		if err := controller.recoverEndpointCleanups(ctx, operation); err != nil {
+			return fmt.Errorf("verify %s endpoint cleanup: %w", component.Name, err)
 		}
 		if err := controller.markComplete(operation, progressKey); err != nil {
 			return err
@@ -660,7 +697,7 @@ func (controller *Controller) removeConflictingPreviousNetwork(
 		); err != nil {
 			return err
 		}
-		if len(actual.Containers) != 0 {
+		if len(actual.Endpoints) != 0 {
 			return fmt.Errorf(
 				"cannot replace network %s while it still has attached containers",
 				previousPlan.Key,
@@ -1287,7 +1324,7 @@ func (controller *Controller) removeObsoleteNetworks(
 		); err != nil {
 			return err
 		}
-		if len(actual.Containers) != 0 {
+		if len(actual.Endpoints) != 0 {
 			return fmt.Errorf("obsolete network %s still has attached containers", key)
 		}
 		callCtx, cancel := controller.callContext(ctx)

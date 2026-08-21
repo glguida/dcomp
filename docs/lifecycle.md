@@ -17,7 +17,9 @@ State format 3, introduced by DComp 0.2, records:
 - exact immutable Docker egress-network and container IDs;
 - the proxy instance ID, PID, wiring digest, runtime directory, control
   socket, and log path;
-- operation phase and completed step keys; and
+- operation phase and completed step keys;
+- endpoint-cleanup records containing the exact container, network, endpoint
+  name, and immutable endpoint ID; and
 - create requests whose result may have been lost.
 
 Named volumes have deterministic names rather than immutable IDs. Their
@@ -56,6 +58,17 @@ changes or the proxy is absent, no component container is retained: a Docker
 bind mount points to a particular socket inode and cannot follow a pathname to
 a newly created listener. DComp retires those containers, then stops the old
 proxy.
+
+Before removing an egress container, DComp inspects its recorded bridge and
+durably journals the exact Docker endpoint name and immutable endpoint ID.
+Container retirement is not complete until a second network inspection proves
+that endpoint absent. If Docker removed the container but stranded the
+endpoint, resume first confirms both the recorded container ID and name are
+absent, verifies the endpoint and network identities, force-disconnects that
+exact endpoint by name, and reinspects the network. An unmatched endpoint is
+never removed. This reconciliation runs before strict unknown-member
+preflight and can derive the journal entry for an interrupted state-format-3
+operation that predates this fix.
 
 ### Networks
 
@@ -157,6 +170,9 @@ the command has established that no create is pending.
 4. clears desired and operation state; and
 5. preserves named volumes and the state-root Engine binding.
 
+Container removal during `down` and abort uses the same durable endpoint
+transaction as apply retirement.
+
 Proxy cleanup removes endpoint/control sockets, PID, readiness, config, log,
 and the system runtime directory. Unexpected non-socket entries are not
 silently deleted.
@@ -175,8 +191,9 @@ accepts new producer and consumer connections without rewiring.
 
 `status` verifies the state-root Engine binding, proxy identity/readiness,
 every recorded egress network, and every component. It reports missing or
-degraded resources but never repairs them. A healthy system with no egress
-networks is operational.
+degraded resources but never repairs them. During an operation it separately
+reports previous components and networks that still await retirement. A
+healthy system with no egress networks is operational.
 
 `ps` builds on coherent status snapshots. `logs` reads verified Docker logs in
 parallel and the recorded proxy log as `@proxy`; `-f` follows all selected
@@ -197,3 +214,5 @@ attaches standard I/O.
 8. Components stop before the proxy during `down`.
 9. Persistent named volumes are never deleted implicitly.
 10. Ambiguous create results remain durable until resolved.
+11. Egress-container retirement is complete only after its recorded endpoint
+    is proven absent.

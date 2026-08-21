@@ -435,6 +435,12 @@ func (controller *Controller) setPhase(
 	operation *state.Operation,
 	phase string,
 ) error {
+	if len(operation.EndpointCleanups) != 0 {
+		return fmt.Errorf(
+			"cannot advance to %s with pending endpoint cleanup",
+			phase,
+		)
+	}
 	operation.Phase = phase
 	operation.Completed = make(map[string]bool)
 	return controller.State.WriteOperation(operation.Target.Name, *operation)

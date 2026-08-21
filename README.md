@@ -191,9 +191,12 @@ components first, then stops the proxy and removes transient egress networks;
 named volumes survive.
 
 `status` reports proxy readiness and connection counts alongside component
-and network diagnostics. `logs` includes proxy records under the source name
-`@proxy`; pass `@proxy` explicitly to select only that stream. Machine-readable
-documents use API version 2.
+and network diagnostics. While an operation is pending, it also separates
+previous-generation components and networks that still await retirement.
+`logs` includes proxy records under the source name `@proxy`; pass `@proxy`
+explicitly to select only that stream. Machine-readable documents use API
+version 2; pending status may add `retiring_components` and
+`retiring_networks` fields.
 
 Lifecycle operations are durable. If a command is interrupted, `resume`
 continues its exact recorded operation and `abort` removes verified new
@@ -206,9 +209,11 @@ Durable state defaults to `$XDG_STATE_HOME/dcomp` or
 The root is bound to one Docker Engine ID.
 
 State records immutable container and network IDs plus the proxy instance ID,
-PID, wiring digest, control socket, log path, and runtime directory. Proxy
-shutdown verifies the control-socket identity before signalling a recorded
-PID, avoiding unsafe PID-only process control.
+PID, wiring digest, control socket, log path, and runtime directory. An
+incomplete operation may also journal the exact endpoint identity that must be
+removed after its container. Proxy shutdown verifies the control-socket
+identity before signalling a recorded PID, avoiding unsafe PID-only process
+control.
 
 Changing only one image can retain unrelated containers and the existing
 proxy. Changing endpoints or links replaces the proxy and component

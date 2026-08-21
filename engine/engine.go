@@ -23,12 +23,21 @@ type Image struct {
 }
 
 type Network struct {
-	ID         string
+	ID        string
+	Name      string
+	Driver    string
+	Internal  bool
+	Labels    map[string]string
+	Endpoints []NetworkEndpoint
+}
+
+// NetworkEndpoint preserves both Docker's Containers map key and the
+// endpoint's immutable identity. The key normally equals the container ID,
+// but Docker exposes a stranded endpoint as "ep-" followed by EndpointID.
+type NetworkEndpoint struct {
+	Key        string
 	Name       string
-	Driver     string
-	Internal   bool
-	Labels     map[string]string
-	Containers []string
+	EndpointID string
 }
 
 type Health string
@@ -222,6 +231,10 @@ type Engine interface {
 	CreateContainer(context.Context, ContainerRequest) (Container, error)
 	ConnectNetwork(context.Context, string, string, []string) error
 	DisconnectNetwork(context.Context, string, string) error
+	// ForceDisconnectNetworkEndpoint removes an endpoint by the exact name
+	// returned from InspectNetwork. It is reserved for recovery after the
+	// owning container has been verified absent.
+	ForceDisconnectNetworkEndpoint(context.Context, string, string) error
 	StartContainer(context.Context, string) error
 	StopContainer(context.Context, string, time.Duration) error
 	// RestartContainer must use the engine's single-container restart

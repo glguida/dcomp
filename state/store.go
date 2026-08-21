@@ -38,6 +38,18 @@ type Deployment struct {
 	Containers  map[string]Resource      `json:"containers"`
 }
 
+// EndpointCleanup is the durable identity of one container endpoint that
+// must be absent before its container-removal step is complete.
+type EndpointCleanup struct {
+	ContainerID   string `json:"container_id"`
+	ContainerName string `json:"container_name"`
+	NetworkKey    string `json:"network_key"`
+	NetworkID     string `json:"network_id"`
+	NetworkName   string `json:"network_name"`
+	EndpointID    string `json:"endpoint_id"`
+	EndpointName  string `json:"endpoint_name"`
+}
+
 type Operation struct {
 	Version     int                      `json:"version"`
 	ID          string                   `json:"id"`
@@ -54,6 +66,9 @@ type Operation struct {
 	// PendingCreates records a create request before it is sent to Docker and
 	// is cleared in the same durable update that records the returned object.
 	PendingCreates map[string]bool `json:"pending_creates,omitempty"`
+	// EndpointCleanups records an endpoint before its container is removed.
+	// It is cleared only after network inspection proves the endpoint absent.
+	EndpointCleanups map[string]EndpointCleanup `json:"endpoint_cleanups,omitempty"`
 }
 
 func NewOperation(
@@ -70,17 +85,18 @@ func NewOperation(
 		return Operation{}, fmt.Errorf("generate operation ID: %w", err)
 	}
 	return Operation{
-		Version:        formatVersion,
-		ID:             hex.EncodeToString(idBytes),
-		Kind:           kind,
-		Phase:          phase,
-		Target:         target,
-		RuntimeRoot:    runtimeRoot,
-		Previous:       previous,
-		Networks:       make(map[string]Resource),
-		Containers:     make(map[string]Resource),
-		Completed:      make(map[string]bool),
-		PendingCreates: make(map[string]bool),
+		Version:          formatVersion,
+		ID:               hex.EncodeToString(idBytes),
+		Kind:             kind,
+		Phase:            phase,
+		Target:           target,
+		RuntimeRoot:      runtimeRoot,
+		Previous:         previous,
+		Networks:         make(map[string]Resource),
+		Containers:       make(map[string]Resource),
+		Completed:        make(map[string]bool),
+		PendingCreates:   make(map[string]bool),
+		EndpointCleanups: make(map[string]EndpointCleanup),
 	}, nil
 }
 
@@ -398,6 +414,9 @@ func (store Store) ReadOperation(name string) (Operation, bool, error) {
 	if operation.PendingCreates == nil {
 		operation.PendingCreates = make(map[string]bool)
 	}
+	if operation.EndpointCleanups == nil {
+		operation.EndpointCleanups = make(map[string]EndpointCleanup)
+	}
 	return operation, true, nil
 }
 
@@ -476,6 +495,16 @@ func validateOperation(name string, operation Operation) error {
 	if operation.Previous != nil {
 		if err := validateDeployment(name, *operation.Previous); err != nil {
 			return fmt.Errorf("previous deployment is invalid: %w", err)
+		}
+	}
+	for endpointID, cleanup := range operation.EndpointCleanups {
+		if endpointID == "" || endpointID != cleanup.EndpointID ||
+			cleanup.ContainerID == "" ||
+			cleanup.ContainerName == "" || cleanup.NetworkKey == "" ||
+			cleanup.NetworkID == "" || cleanup.NetworkName == "" ||
+			cleanup.EndpointName == "" ||
+			cleanup.EndpointName != cleanup.ContainerName {
+			return fmt.Errorf("operation state has invalid endpoint cleanup %q", endpointID)
 		}
 	}
 	return nil

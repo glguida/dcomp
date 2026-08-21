@@ -120,6 +120,8 @@ type fakeEngine struct {
 	connectErrors          map[string][]error
 	connectAnyErrors       []error
 	disconnectErrors       map[string][]error
+	forceDisconnectErrors  map[string][]error
+	orphanOnRemove         map[string]bool
 	startFailures          map[string][]error
 	restartFailures        map[string][]error
 
@@ -133,6 +135,7 @@ type fakeEngine struct {
 
 	nextNetwork   int
 	nextContainer int
+	nextEndpoint  int
 }
 
 func newFakeEngine() *fakeEngine {
@@ -153,6 +156,8 @@ func newFakeEngine() *fakeEngine {
 		createContainerErrors:  make(map[string][]error),
 		connectErrors:          make(map[string][]error),
 		disconnectErrors:       make(map[string][]error),
+		forceDisconnectErrors:  make(map[string][]error),
+		orphanOnRemove:         make(map[string]bool),
 		startFailures:          make(map[string][]error),
 		restartFailures:        make(map[string][]error),
 		healthOnStart:          make(map[string]engine.Health),
@@ -250,7 +255,7 @@ func (fake *fakeEngine) RemoveNetwork(ctx context.Context, id string) error {
 	if !exists {
 		return engine.ErrNotFound
 	}
-	if len(network.Containers) != 0 {
+	if len(network.Endpoints) != 0 {
 		return fmt.Errorf("network %s still has attached containers", id)
 	}
 	delete(fake.networks, id)
@@ -453,6 +458,48 @@ func (fake *fakeEngine) DisconnectNetwork(
 	return nil
 }
 
+func (fake *fakeEngine) ForceDisconnectNetworkEndpoint(
+	ctx context.Context,
+	networkID string,
+	endpointName string,
+) error {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.record("force-disconnect-network", networkID+"->"+endpointName)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	network, exists := fake.networks[networkID]
+	if !exists {
+		return engine.ErrNotFound
+	}
+	if err := popFailure(
+		fake.forceDisconnectErrors,
+		networkID+"->"+endpointName,
+	); err != nil {
+		return err
+	}
+	matched := -1
+	for index, endpoint := range network.Endpoints {
+		if endpoint.Name != endpointName {
+			continue
+		}
+		if matched >= 0 {
+			return fmt.Errorf("multiple endpoints named %s", endpointName)
+		}
+		matched = index
+	}
+	if matched < 0 {
+		return engine.ErrNotFound
+	}
+	network.Endpoints = append(
+		append([]engine.NetworkEndpoint(nil), network.Endpoints[:matched]...),
+		network.Endpoints[matched+1:]...,
+	)
+	fake.networks[networkID] = network
+	return nil
+}
+
 func (fake *fakeEngine) StartContainer(ctx context.Context, id string) error {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
@@ -516,15 +563,6 @@ func (fake *fakeEngine) StopContainer(ctx context.Context, id string, _ time.Dur
 	container.Status = "exited"
 	container.Running = false
 	container.Health = engine.HealthNone
-	for name, attachment := range container.Networks {
-		networkID, exists := fake.networkNames[name]
-		if !exists {
-			continue
-		}
-		fake.detach(networkID, id)
-		attachment.NetworkID = ""
-		container.Networks[name] = attachment
-	}
 	fake.containers[id] = container
 	return nil
 }
@@ -567,7 +605,11 @@ func (fake *fakeEngine) RemoveContainer(ctx context.Context, id string) error {
 		if networkID == "" {
 			networkID = fake.networkNames[name]
 		}
-		fake.detach(networkID, id)
+		if fake.orphanOnRemove[id] {
+			fake.orphan(networkID, id)
+		} else {
+			fake.detach(networkID, id)
+		}
 	}
 	delete(fake.containers, id)
 	delete(fake.containerNames, container.Name)
@@ -576,13 +618,20 @@ func (fake *fakeEngine) RemoveContainer(ctx context.Context, id string) error {
 
 func (fake *fakeEngine) attach(networkID, containerID string) {
 	network := fake.networks[networkID]
-	for _, existing := range network.Containers {
-		if existing == containerID {
+	for _, existing := range network.Endpoints {
+		if existing.Key == containerID {
 			return
 		}
 	}
-	network.Containers = append(network.Containers, containerID)
-	sort.Strings(network.Containers)
+	fake.nextEndpoint++
+	network.Endpoints = append(network.Endpoints, engine.NetworkEndpoint{
+		Key:        containerID,
+		Name:       fake.containers[containerID].Name,
+		EndpointID: fmt.Sprintf("endpoint-%d", fake.nextEndpoint),
+	})
+	sort.Slice(network.Endpoints, func(i, j int) bool {
+		return network.Endpoints[i].Key < network.Endpoints[j].Key
+	})
 	fake.networks[networkID] = network
 }
 
@@ -591,13 +640,26 @@ func (fake *fakeEngine) detach(networkID, containerID string) {
 	if !exists {
 		return
 	}
-	filtered := network.Containers[:0]
-	for _, existing := range network.Containers {
-		if existing != containerID {
+	filtered := network.Endpoints[:0]
+	for _, existing := range network.Endpoints {
+		if existing.Key != containerID {
 			filtered = append(filtered, existing)
 		}
 	}
-	network.Containers = append([]string(nil), filtered...)
+	network.Endpoints = append([]engine.NetworkEndpoint(nil), filtered...)
+	fake.networks[networkID] = network
+}
+
+func (fake *fakeEngine) orphan(networkID, containerID string) {
+	network, exists := fake.networks[networkID]
+	if !exists {
+		return
+	}
+	for index, endpoint := range network.Endpoints {
+		if endpoint.Key == containerID {
+			network.Endpoints[index].Key = "ep-" + endpoint.EndpointID
+		}
+	}
 	fake.networks[networkID] = network
 }
 
@@ -644,7 +706,7 @@ func (fake *fakeEngine) mutationCalls() []engineCall {
 		switch call.Method {
 		case "create-network", "remove-network",
 			"create-volume", "create-container", "remove-container",
-			"connect-network", "disconnect-network",
+			"connect-network", "disconnect-network", "force-disconnect-network",
 			"start-container", "stop-container", "restart-container":
 			result = append(result, call)
 		}
@@ -717,6 +779,24 @@ func (fake *fakeEngine) deleteContainerOutOfBand(id string) {
 	delete(fake.containerNames, container.Name)
 }
 
+func (fake *fakeEngine) orphanContainerOutOfBand(id string) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	container, exists := fake.containers[id]
+	if !exists {
+		return
+	}
+	for name, attachment := range container.Networks {
+		networkID := attachment.NetworkID
+		if networkID == "" {
+			networkID = fake.networkNames[name]
+		}
+		fake.orphan(networkID, id)
+	}
+	delete(fake.containers, id)
+	delete(fake.containerNames, container.Name)
+}
+
 func cloneImage(input engine.Image) engine.Image {
 	input.DeclaredVolumes = append([]string(nil), input.DeclaredVolumes...)
 	return input
@@ -724,7 +804,7 @@ func cloneImage(input engine.Image) engine.Image {
 
 func cloneNetwork(input engine.Network) engine.Network {
 	input.Labels = cloneStrings(input.Labels)
-	input.Containers = append([]string(nil), input.Containers...)
+	input.Endpoints = append([]engine.NetworkEndpoint(nil), input.Endpoints...)
 	return input
 }
 
