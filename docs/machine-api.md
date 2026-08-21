@@ -305,7 +305,7 @@ The complete topology semantics and human viewer behavior are documented in
 ## Dashboard HTTP documents
 
 ```text
-dcomp [GLOBAL_OPTIONS] dash [--listen ADDRESS] [FILE|NAME...]
+dcomp [GLOBAL_OPTIONS] dashboard [--listen ADDRESS] [FILE|NAME...]
 ```
 
 The dashboard serves two read-only JSON endpoints:

@@ -156,7 +156,7 @@ dcomp check system.dcomp
 dcomp up system.dcomp
 dcomp status document-system
 dcomp view system.dcomp
-dcomp dash
+dcomp dashboard
 dcomp logs -f document-system
 dcomp restart document-system filter
 dcomp down document-system
@@ -169,10 +169,10 @@ covers every command, flag, exit status, environment override, and authored
 directive. Automation should use [Machine API 2](docs/machine-api.md).
 
 `dcomp view [--json] FILE|NAME` describes a system's components, declared
-interfaces, links, and external routes. `dcomp dash` serves the same read-only
+interfaces, links, and external routes. `dcomp dashboard` serves the same read-only
 documents with a bundled topology viewer. See [System view](docs/view.md).
 
-<img src="docs/assets/system-view.png" alt="The dash viewer drawing a system as an isometric board: wireframe components, routed link traces, hazard tape on components with external reach, and a published entry on the boundary" width="100%">
+<img src="docs/assets/system-view.png" alt="The dashboard viewer drawing a system as an isometric board: wireframe components, routed link traces, hazard tape on components with external reach, and a published entry on the boundary" width="100%">
 
 ## State and identity
 

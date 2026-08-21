@@ -1,7 +1,7 @@
 # System View
 
 DComp exposes one machine-readable description of a system — the view
-document — and ships one consumer of it, the dash viewer. The document is the
+document — and ships one consumer of it, the dashboard viewer. The document is the
 stable contract; the viewer is replaceable. Anyone can build their own viewer
 against the same two read-only HTTP endpoints or against `dcomp view --json`.
 
@@ -45,13 +45,13 @@ These fields are absent in file views or when proxy metrics are unavailable;
 absence means unknown, not idle. A view is an observation: reading it never
 repairs, starts, or stops anything.
 
-## The dash server
+## The dashboard server
 
 ```text
-dcomp dash [--listen ADDRESS] [FILE|NAME...]
+dcomp dashboard [--listen ADDRESS] [FILE|NAME...]
 ```
 
-`dash` binds `127.0.0.1:8199` by default and serves until interrupted:
+`dashboard` binds `127.0.0.1:8199` by default and serves until interrupted:
 
 ```text
 GET /                    the bundled viewer

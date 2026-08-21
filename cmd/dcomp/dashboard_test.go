@@ -29,8 +29,8 @@ func (backend *fakeBackend) Status(
 	return lifecycle.Status{Name: name}, nil
 }
 
-func TestDashServesEmbeddedPage(t *testing.T) {
-	server := newDashServer(&fakeBackend{}, nil, nil)
+func TestDashboardServesEmbeddedPage(t *testing.T) {
+	server := newDashboardServer(&fakeBackend{}, nil, nil)
 	recorder := httptest.NewRecorder()
 	server.handler().ServeHTTP(
 		recorder,
@@ -51,9 +51,9 @@ func TestDashServesEmbeddedPage(t *testing.T) {
 	}
 }
 
-func TestDashSystemsAndViewDocuments(t *testing.T) {
+func TestDashboardSystemsAndViewDocuments(t *testing.T) {
 	backend := &fakeBackend{systems: []string{"alpha", "beta"}}
-	server := newDashServer(backend, nil, nil)
+	server := newDashboardServer(backend, nil, nil)
 	handler := server.handler()
 
 	recorder := httptest.NewRecorder()
@@ -89,9 +89,9 @@ func TestDashSystemsAndViewDocuments(t *testing.T) {
 	}
 }
 
-func TestDashSelectionRestrictsServedSystems(t *testing.T) {
+func TestDashboardSelectionRestrictsServedSystems(t *testing.T) {
 	backend := &fakeBackend{systems: []string{"alpha", "beta"}}
-	server := newDashServer(backend, []string{"beta"}, nil)
+	server := newDashboardServer(backend, []string{"beta"}, nil)
 	handler := server.handler()
 
 	recorder := httptest.NewRecorder()
@@ -117,9 +117,9 @@ func TestDashSelectionRestrictsServedSystems(t *testing.T) {
 	}
 }
 
-func TestDashSystemsDeduplicatesFileOverRecordedSystem(t *testing.T) {
+func TestDashboardSystemsDeduplicatesFileOverRecordedSystem(t *testing.T) {
 	backend := &fakeBackend{systems: []string{"alpha"}}
-	server := newDashServer(
+	server := newDashboardServer(
 		backend,
 		[]string{"alpha"},
 		map[string]string{"alpha": "/unused/system.dcomp"},
@@ -134,9 +134,9 @@ func TestDashSystemsDeduplicatesFileOverRecordedSystem(t *testing.T) {
 	}
 }
 
-func TestDashViewIsCachedWithinTheObservationWindow(t *testing.T) {
+func TestDashboardViewIsCachedWithinTheObservationWindow(t *testing.T) {
 	backend := &fakeBackend{systems: []string{"alpha"}}
-	server := newDashServer(backend, nil, nil)
+	server := newDashboardServer(backend, nil, nil)
 	now := time.Unix(1000, 0)
 	server.now = func() time.Time { return now }
 	handler := server.handler()
@@ -166,8 +166,8 @@ func TestDashViewIsCachedWithinTheObservationWindow(t *testing.T) {
 	}
 }
 
-func TestDashRejectsNonGetAndTraversal(t *testing.T) {
-	server := newDashServer(&fakeBackend{systems: []string{"alpha"}}, nil, nil)
+func TestDashboardRejectsNonGetAndTraversal(t *testing.T) {
+	server := newDashboardServer(&fakeBackend{systems: []string{"alpha"}}, nil, nil)
 	handler := server.handler()
 
 	recorder := httptest.NewRecorder()

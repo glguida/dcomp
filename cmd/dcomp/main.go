@@ -31,7 +31,7 @@ Usage:
   dcomp [--state-root DIR] [--runtime-root DIR] ps [-a|--all] [--json] [NAME]
   dcomp [--state-root DIR] [--runtime-root DIR] status [--json] NAME
   dcomp [--state-root DIR] [--runtime-root DIR] view [--json] FILE|NAME
-  dcomp [--state-root DIR] [--runtime-root DIR] dash [--listen ADDRESS] [FILE|NAME...]
+  dcomp [--state-root DIR] [--runtime-root DIR] dashboard [--listen ADDRESS] [FILE|NAME...]
   dcomp [--state-root DIR] [--runtime-root DIR] volume [--json] SYSTEM COMPONENT LOGICAL
   dcomp [--state-root DIR] [--runtime-root DIR] logs [-f|--follow] NAME [COMPONENT...]
   dcomp [--state-root DIR] [--runtime-root DIR] attach [--ready-fd FD] SYSTEM COMPONENT
@@ -241,20 +241,20 @@ func run(arguments []string) int {
 		} else {
 			printView(os.Stdout, document)
 		}
-	case "dash":
-		dashFlags := flag.NewFlagSet("dcomp dash", flag.ContinueOnError)
-		dashFlags.SetOutput(os.Stderr)
-		listen := dashFlags.String(
+	case "dashboard":
+		dashboardFlags := flag.NewFlagSet("dcomp dashboard", flag.ContinueOnError)
+		dashboardFlags.SetOutput(os.Stderr)
+		listen := dashboardFlags.String(
 			"listen",
 			"127.0.0.1:8199",
-			"local address the dash server binds",
+			"local address the dashboard server binds",
 		)
-		if err := dashFlags.Parse(commandArgs); err != nil {
+		if err := dashboardFlags.Parse(commandArgs); err != nil {
 			return 2
 		}
-		names := make([]string, 0, dashFlags.NArg())
+		names := make([]string, 0, dashboardFlags.NArg())
 		files := make(map[string]string)
-		for _, target := range dashFlags.Args() {
+		for _, target := range dashboardFlags.Args() {
 			if info, statErr := os.Stat(target); statErr == nil && info.Mode().IsRegular() {
 				spec, err := composition.Load(target)
 				if err != nil {
@@ -275,13 +275,13 @@ func run(arguments []string) int {
 		if err != nil {
 			return commandError(err, ctx)
 		}
-		fmt.Fprintf(os.Stderr, "dcomp dash observing on http://%s/\n", listener.Addr())
-		server := newDashServer(
+		fmt.Fprintf(os.Stderr, "dcomp dashboard observing on http://%s/\n", listener.Addr())
+		server := newDashboardServer(
 			controllerBackend{controller: &controller},
 			names,
 			files,
 		)
-		if err := runDash(ctx, listener, server); err != nil {
+		if err := runDashboard(ctx, listener, server); err != nil {
 			return commandError(err, ctx)
 		}
 	case "volume":

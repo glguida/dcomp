@@ -13,7 +13,7 @@ import (
 // The view document is the machine-readable description of one system: its
 // wiring topology and, when observed from durable state, the live status of
 // its resources. It is the single contract consumed by `dcomp view --json`,
-// the dash HTTP API, and external viewers. See docs/view.md.
+// the dashboard HTTP API, and external viewers. See docs/view.md.
 
 type viewDocument struct {
 	APIVersion int `json:"api_version"`

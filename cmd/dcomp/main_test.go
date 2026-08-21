@@ -49,6 +49,26 @@ func TestRootFlagsAcceptTrailingSeparators(t *testing.T) {
 	}
 }
 
+func TestDashboardCommandReachesListener(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("DCOMP_STATE_ROOT", root)
+	t.Setenv("DOCKER_HOST", "unix://"+filepath.Join(root, "missing.sock"))
+
+	if code := run([]string{"dashboard", "--listen", "not-an-address"}); code != 1 {
+		t.Fatalf("dashboard exit code = %d, want listener error 1", code)
+	}
+}
+
+func TestDashCommandIsRejected(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("DCOMP_STATE_ROOT", root)
+	t.Setenv("DOCKER_HOST", "unix://"+filepath.Join(root, "missing.sock"))
+
+	if code := run([]string{"dash"}); code != 2 {
+		t.Fatalf("removed dash command exit code = %d, want usage error 2", code)
+	}
+}
+
 func TestPSJSONListsNoComponentsForEmptyState(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("DCOMP_STATE_ROOT", root)

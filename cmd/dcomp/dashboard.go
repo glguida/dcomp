@@ -30,10 +30,10 @@ var dashboardContent = func() fs.FS {
 	return sub
 }()
 
-// dashBackend is the observational surface the dash server needs. The
+// dashboardBackend is the observational surface the dashboard server needs. The
 // concrete implementation is the lifecycle controller plus its state store;
 // tests supply an in-memory one.
-type dashBackend interface {
+type dashboardBackend interface {
 	Systems() ([]string, error)
 	Status(ctx context.Context, name string) (lifecycle.Status, error)
 }
@@ -58,10 +58,10 @@ type systemsDocument struct {
 	Systems    []string `json:"systems"`
 }
 
-// dashServer serves the embedded viewer and the read-only view API. It never
+// dashboardServer serves the embedded viewer and the read-only view API. It never
 // mutates state or Docker resources.
-type dashServer struct {
-	backend dashBackend
+type dashboardServer struct {
+	backend dashboardBackend
 	// selected restricts the served state systems when non-empty.
 	selected map[string]struct{}
 	// files maps a system name to a system file served as configuration.
@@ -80,12 +80,12 @@ type cachedView struct {
 	document viewDocument
 }
 
-func newDashServer(
-	backend dashBackend,
+func newDashboardServer(
+	backend dashboardBackend,
 	systems []string,
 	files map[string]string,
-) *dashServer {
-	server := &dashServer{
+) *dashboardServer {
+	server := &dashboardServer{
 		backend:  backend,
 		files:    files,
 		cacheFor: time.Second,
@@ -101,7 +101,7 @@ func newDashServer(
 	return server
 }
 
-func (server *dashServer) handler() http.Handler {
+func (server *dashboardServer) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/", server.handlePage(http.FileServerFS(dashboardContent)))
 	mux.HandleFunc("/api/v2/systems", server.handleSystems)
@@ -109,7 +109,7 @@ func (server *dashServer) handler() http.Handler {
 	return mux
 }
 
-func (server *dashServer) handlePage(files http.Handler) http.Handler {
+func (server *dashboardServer) handlePage(files http.Handler) http.Handler {
 	return http.HandlerFunc(func(
 		response http.ResponseWriter,
 		request *http.Request,
@@ -123,7 +123,7 @@ func (server *dashServer) handlePage(files http.Handler) http.Handler {
 	})
 }
 
-func (server *dashServer) handleSystems(
+func (server *dashboardServer) handleSystems(
 	response http.ResponseWriter,
 	request *http.Request,
 ) {
@@ -144,7 +144,7 @@ func (server *dashServer) handleSystems(
 	})
 }
 
-func (server *dashServer) handleView(
+func (server *dashboardServer) handleView(
 	response http.ResponseWriter,
 	request *http.Request,
 ) {
@@ -171,7 +171,7 @@ func (server *dashServer) handleView(
 	_ = writeDocument(response, document)
 }
 
-func (server *dashServer) serves(name string) bool {
+func (server *dashboardServer) serves(name string) bool {
 	if _, file := server.files[name]; file {
 		return true
 	}
@@ -182,7 +182,7 @@ func (server *dashServer) serves(name string) bool {
 	return exists
 }
 
-func (server *dashServer) systems() ([]string, error) {
+func (server *dashboardServer) systems() ([]string, error) {
 	names, err := server.backend.Systems()
 	if err != nil {
 		return nil, err
@@ -205,7 +205,7 @@ func (server *dashServer) systems() ([]string, error) {
 	return selected, nil
 }
 
-func (server *dashServer) view(
+func (server *dashboardServer) view(
 	ctx context.Context,
 	name string,
 ) (viewDocument, error) {
@@ -238,9 +238,9 @@ func (server *dashServer) view(
 	return document, nil
 }
 
-// runDash serves until ctx is cancelled. The listener is already bound so the
+// runDashboard serves until ctx is cancelled. The listener is already bound so the
 // caller can print the effective address before blocking.
-func runDash(ctx context.Context, listener net.Listener, server *dashServer) error {
+func runDashboard(ctx context.Context, listener net.Listener, server *dashboardServer) error {
 	httpServer := &http.Server{
 		Handler:           server.handler(),
 		ReadHeaderTimeout: 5 * time.Second,
@@ -254,7 +254,7 @@ func runDash(ctx context.Context, listener net.Listener, server *dashServer) err
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
-		return fmt.Errorf("serve dash: %w", err)
+		return fmt.Errorf("serve dashboard: %w", err)
 	case <-ctx.Done():
 	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)

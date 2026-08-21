@@ -177,7 +177,7 @@ identity-checked control socket. See [Lifecycle](lifecycle.md).
 `status` observes one coherent state generation under a shared lock and
 reports proxy, network, and component health, including previous-generation
 resources still awaiting retirement. `view` joins the resolved topology to
-that observation, while `dash` serves the same read-only document to the
+that observation, while `dashboard` serves the same read-only document to the
 bundled local viewer. `logs` concurrently merges Docker logs with `proxy.log`;
 proxy records use the source name `@proxy`. Observation never repairs
 resources.

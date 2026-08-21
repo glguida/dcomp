@@ -123,10 +123,10 @@ document. Unlike `status`, observing an absent named system succeeds with an
 empty, non-operational view; consumers should inspect `desired` and
 `operational`.
 
-### `dash`
+### `dashboard`
 
 ```text
-dcomp [GLOBAL_OPTIONS] dash [--listen ADDRESS] [FILE|NAME...]
+dcomp [GLOBAL_OPTIONS] dashboard [--listen ADDRESS] [FILE|NAME...]
 ```
 
 Serve the bundled read-only system viewer and API 2 view documents until the
