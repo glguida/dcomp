@@ -72,10 +72,11 @@ filesystem, shutdown, and runtime-policy rules.
 
 ## Proxy data plane
 
-The host runtime layout defaults to `/var/run/dcomp`:
+The host runtime layout defaults to `<state-root>/run`, so selecting another
+state root also selects an independent proxy and socket tree by default:
 
 ```text
-/var/run/dcomp/<system>/
+<state-root>/run/<system>/
 ├── proxy.json
 ├── proxy.pid
 ├── proxy.log
@@ -88,7 +89,8 @@ The host runtime layout defaults to `/var/run/dcomp`:
 ```
 
 Use `--runtime-root DIR` or `DCOMP_RUNTIME_ROOT` when another absolute host
-path is required. This tree is transient and is distinct from durable state.
+path is required. The runtime tree is reconstructible even though its default
+location is inside the durable state root.
 
 Inside a component, only its own endpoints are mounted:
 
@@ -176,7 +178,11 @@ documents with a bundled topology viewer. See [System view](docs/view.md).
 
 Durable state defaults to `$XDG_STATE_HOME/dcomp` or
 `$HOME/.local/state/dcomp`; `--state-root` and `DCOMP_STATE_ROOT` override it.
-The root is bound to one Docker Engine ID.
+The root is bound to one Docker Engine ID and defines its own Docker resource
+namespace. Containers, egress networks, and named volumes use physical names
+beginning `dcomp.<namespace>.`; the namespace is the first 128 bits of SHA-256
+over the cleaned absolute state-root path. Two state roots can therefore run
+the same system name independently on one Docker Engine.
 
 State records immutable container and network IDs plus the proxy instance ID,
 PID, wiring digest, control socket, log path, and runtime directory. An

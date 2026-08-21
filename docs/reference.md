@@ -24,7 +24,12 @@ The global options are:
 
 The state-root precedence is `--state-root`, `DCOMP_STATE_ROOT`,
 `$XDG_STATE_HOME/dcomp`, then `$HOME/.local/state/dcomp`. The runtime-root
-precedence is `--runtime-root`, `DCOMP_RUNTIME_ROOT`, then `/var/run/dcomp`.
+precedence is `--runtime-root`, `DCOMP_RUNTIME_ROOT`, then `<state-root>/run`.
+The cleaned absolute state-root path also selects the Docker resource
+namespace used in physical container, egress-network, and named-volume names
+and ownership labels. Consequently, two state roots can use the same system
+name on one Docker Engine without sharing those resources. `--runtime-root`
+does not affect the Docker namespace.
 
 DComp uses `DOCKER_HOST` when it names a local `unix://` Docker socket and
 otherwise defaults to `unix:///var/run/docker.sock`. Remote TCP/HTTP Docker
@@ -109,7 +114,8 @@ When the argument is an existing regular file, DComp parses it and reports its
 components, interfaces, links, mounts, arguments, and external routes without
 resolving images or contacting Docker. When the argument is a system name,
 DComp joins the recorded resolved topology with current proxy, network, and
-component observations. A missing argument containing a path separator or
+component observations, including each link's connection state and cumulative
+directional byte counters. A missing argument containing a path separator or
 ending in `.dcomp` is treated as a missing file rather than a system name.
 
 Plain output is intended for terminals. `--json` emits the API 2 view
@@ -145,6 +151,9 @@ Resolve one persistent logical volume to its deterministic Docker volume name.
 DComp returns the name only after verifying the volume's local driver and full
 ownership labels. This remains usable after `down`, because named volumes and
 the state-root engine binding survive system removal.
+
+The physical name is
+`dcomp.<state-root-namespace>.<system>.volume.<component>.<logical>`.
 
 Plain output is the Docker volume name. `--json` emits the API 2 volume
 document.

@@ -49,6 +49,14 @@ does not carry DComp interface traffic.
 There are no per-link Docker networks. Components linked to each other have no
 Docker network path to one another.
 
+Each state root has a deterministic Docker namespace: the first 128 bits of
+SHA-256 over its cleaned absolute path, encoded as 32 lowercase hexadecimal
+characters. DComp prefixes every container, egress-network, and named-volume
+name with `dcomp.<namespace>.<system>.` and includes the namespace in its
+ownership labels. Thus identical system and component names under different
+state roots do not collide on the same Docker Engine. An explicit runtime root
+changes proxy placement only; it does not change this Docker namespace.
+
 The proxy creates one Unix listener for every resolved endpoint:
 
 ```text
@@ -56,8 +64,9 @@ The proxy creates one Unix listener for every resolved endpoint:
 <runtime-root>/<system>/out/<instance>.<output>
 ```
 
-The default runtime root is `/var/run/dcomp`. A component receives individual
-bind mounts at:
+The default runtime root is `<state-root>/run`; an explicit `--runtime-root`
+or `DCOMP_RUNTIME_ROOT` may place the reconstructible proxy tree elsewhere. A
+component receives individual bind mounts at:
 
 ```text
 /run/dcomp/in/<input>
@@ -105,8 +114,11 @@ start before that signal.
 
 The control socket supports identity-checked status and graceful shutdown.
 Status reports the PID, wiring digest, endpoint counts, pending connections,
-and active stream-pair count. A shutdown request must carry the recorded proxy
-instance ID.
+and system-wide active stream-pair count. It also reports, for every declared
+link, its active stream-pair gauge and cumulative bytes successfully forwarded
+in both directions. Counters live for one proxy process and reset when that
+proxy is replaced. A shutdown request must carry the recorded proxy instance
+ID.
 
 Unix socket pathnames have a small kernel limit. If a valid runtime endpoint
 would exceed it, the proxy binds a deterministic short path in a private,

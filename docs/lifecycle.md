@@ -8,7 +8,13 @@ lock serializes mutation; shared locks give observers a coherent generation.
 
 The default state root is `$XDG_STATE_HOME/dcomp` or
 `$HOME/.local/state/dcomp`. `DCOMP_STATE_ROOT` and `--state-root` select another
-absolute path. The root is bound write-once to Docker's stable Engine ID.
+absolute path. The root is bound write-once to Docker's stable Engine ID. By
+default, transient proxy state lives in its `run` subdirectory; an explicit
+runtime-root option or environment variable may place that tree elsewhere.
+The cleaned absolute state-root path also determines a 128-bit Docker
+namespace. Every owned container, egress network, and named volume includes
+that namespace in both its physical name and ownership labels, so another
+state root can control an independently named system on the same Engine.
 
 State format 3, introduced by DComp 0.2, records:
 
@@ -27,10 +33,12 @@ driver and complete DComp ownership label set are verified on every use.
 
 ## Identity and authority
 
-Human-readable names are discovery aids, not mutation authority. Before a
-Docker mutation, DComp inspects the recorded immutable ID and verifies the
-expected name, image, labels, launch security, mounts, environment, ports, and
-network attachments.
+Human-readable names are discovery aids, not mutation authority. Physical
+Docker names have the form `dcomp.<namespace>.<system>.<kind>...`, where the
+32-hex-character namespace is the first 128 bits of SHA-256 over the cleaned
+absolute state-root path. Before a Docker mutation, DComp inspects the
+recorded immutable ID and verifies the expected namespace, name, image,
+labels, launch security, mounts, environment, ports, and network attachments.
 
 The proxy is controlled through its Unix control socket. Requests carry the
 recorded instance ID; status must return the same ID, wiring digest, and PID.
@@ -204,15 +212,16 @@ attaches standard I/O.
 ## Invariants
 
 1. A state root controls resources on one Docker Engine only.
-2. Every mutation follows exact identity and ownership verification.
-3. A component has no Docker network unless it declares `egress`; then it has
+2. Different state roots use different Docker resource namespaces.
+3. Every mutation follows exact identity and ownership verification.
+4. A component has no Docker network unless it declares `egress`; then it has
    exactly one dedicated, externally routed bridge.
-4. No application link creates a Docker network.
-5. The proxy is ready before a component is created or started.
-6. A container sees only its own interface socket files.
-7. Components connect to interface sockets; only the proxy binds/listens.
-8. Components stop before the proxy during `down`.
-9. Persistent named volumes are never deleted implicitly.
-10. Ambiguous create results remain durable until resolved.
-11. Egress-container retirement is complete only after its recorded endpoint
+5. No application link creates a Docker network.
+6. The proxy is ready before a component is created or started.
+7. A container sees only its own interface socket files.
+8. Components connect to interface sockets; only the proxy binds/listens.
+9. Components stop before the proxy during `down`.
+10. Persistent named volumes are never deleted implicitly.
+11. Ambiguous create results remain durable until resolved.
+12. Egress-container retirement is complete only after its recorded endpoint
     is proven absent.

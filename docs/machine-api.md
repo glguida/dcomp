@@ -67,6 +67,17 @@ Representative operational response:
     "inputs": 2,
     "outputs": 2,
     "active_connections": 2,
+    "links": [
+      {
+        "input_component": "worker",
+        "input_endpoint": "requests",
+        "output_component": "source",
+        "output_endpoint": "requests",
+        "active_connections": 1,
+        "bytes_input_to_output": 2048,
+        "bytes_output_to_input": 8192
+      }
+    ],
     "problem": ""
   },
   "networks": [],
@@ -99,7 +110,9 @@ Top-level fields:
   `start`, `commit`, `restart`, `down`, or `abort`.
 - `proxy` is always an object. Its identity strings and PID are empty/zero when
   no proxy is recorded. `active_connections` counts active proxy stream pairs,
-  not idle producer connections.
+  not idle producer connections. When available, `links` contains one item per
+  declared link with its active-pair gauge and cumulative directional bytes.
+  Byte counters reset when the proxy process is replaced.
 - `networks` contains the target or committed component egress networks.
 - `components` contains the target or committed component records, sorted by
   component name.
@@ -236,7 +249,13 @@ it with current observations. Representative state response:
     {
       "service": "example.v1.Requests",
       "input": {"component":"worker","endpoint":"requests"},
-      "output": {"component":"source","endpoint":"requests"}
+      "output": {"component":"source","endpoint":"requests"},
+      "active": true,
+      "active_connections": 1,
+      "activity": {
+        "bytes_input_to_output": 2048,
+        "bytes_output_to_input": 8192
+      }
     }
   ],
   "proxy": {
@@ -258,18 +277,23 @@ it with current observations. Representative state response:
   image reference, sorted endpoint declarations, egress policy, binds,
   volumes, arguments, and declared port publications. `image_id` and `status`
   are present only in state views with a resolved component and observation.
-- `links` is sorted by input reference. `activity` is an optional future
-  per-link observation and is absent in API 2; absence means unknown, not zero.
+- `links` is sorted by input reference. A live proxy observation adds
+  `active`, `active_connections`, and `activity`. `active` is connection state;
+  `activity` contains cumulative successfully forwarded bytes in each
+  direction. These observations are absent for file views or unavailable
+  proxy metrics; absence means unknown, not zero.
 - `networks` may be present for a recorded topology with egress networks, and
   `proxy` is present for a recorded topology. Network and component status
   objects use the status-document schemas. The proxy object reports readiness,
   endpoint counts, system-wide active stream pairs, and a diagnostic problem;
-  it intentionally omits process identity.
+  link metrics live on the links themselves, and the proxy object intentionally
+  omits process identity.
 
 `digest`, `operation`, `phase`, `networks`, and `proxy` are optional. Within a
-component, `image_id` and `status` are optional. Within a link, `activity` is
-optional. Arrays that are part of a component or the top-level topology are
-otherwise present even when empty.
+component, `image_id` and `status` are optional. Within a link, `active`,
+`active_connections`, and `activity` are optional as one observation group.
+Arrays that are part of a component or the top-level topology are otherwise
+present even when empty.
 
 An absent named system emits a successful `source=state` document with empty
 component and link arrays, `desired=false`, and `operational=false`. Unlike
@@ -347,13 +371,15 @@ dcomp [GLOBAL_OPTIONS] volume --json SYSTEM COMPONENT LOGICAL
   "system": "demo",
   "component": "worker",
   "logical_name": "state",
-  "name": "dcomp.demo.volume.worker.state"
+  "name": "dcomp.0123456789abcdef0123456789abcdef.demo.volume.worker.state"
 }
 ```
 
 The first three identity fields echo the requested coordinates. `name` is the
-verified Docker volume name. DComp emits the document only after the existing
-volume's driver and complete ownership labels match those coordinates.
+verified Docker volume name; the 32 hexadecimal characters after `dcomp.` are
+the namespace derived from the selected state root. DComp emits the document
+only after the existing volume's driver and complete ownership labels match
+those coordinates and that namespace.
 
 ## Attachment readiness protocol
 

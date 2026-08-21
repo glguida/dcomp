@@ -35,11 +35,15 @@ Each component carries its declared interface and bounded runtime policy —
 `volumes`, `args`, `published_ports` — and, in `state` mode, a `status`
 object with `container_id`, `status`, `health`, `exit_code`, and `problem`.
 Each link carries its `input` and `output` endpoint references and the linked
-`service`, plus an optional `activity` object reserved for future per-link
-proxy accounting. DComp 0.2 reports the proxy's system-wide active stream-pair
-count but not per-link counts, so `activity` is absent; absence means unknown,
-not idle. A view is an observation: reading it never repairs, starts, or stops
-anything.
+`service`. A live proxy observation additionally carries `active`, the exact
+`active_connections` gauge, and cumulative directional counters under
+`activity.bytes_input_to_output` and `activity.bytes_output_to_input`.
+`active` means at least one stream pair is currently forwarding; it says
+nothing about whether bytes are moving. The counters measure successfully
+forwarded opaque transport bytes and reset when the per-system proxy restarts.
+These fields are absent in file views or when proxy metrics are unavailable;
+absence means unknown, not idle. A view is an observation: reading it never
+repairs, starts, or stops anything.
 
 ## The dash server
 
@@ -75,17 +79,19 @@ links are routed at right angles, and no arrowheads exist anywhere.
 - An open square is an input, a filled square an output; each link is one
   channel routed like a board trace — around tiles, at a distance from
   unrelated modules, jumping another trace with a squared hop where it must
-  cross. The selected link is drawn in rosso, the single accent.
-- Beads marching along a channel mean observed traffic, reported through the
-  link's `activity` field. An up channel with no activity data is a solid,
-  still line — the viewer never invents motion it has not been told about.
+  cross. A black channel is disconnected and a green channel has a live
+  stream pair. The selected link is drawn in rosso.
+- Beads mean measured traffic, not connectivity. The viewer derives a recent
+  byte rate from successive cumulative counter observations; more traffic
+  produces denser, faster beads, and an idle connected link remains solid
+  green. The visual rate cools over a few seconds between observations.
 - The dashed enclosure is the internal boundary. Each egress component has an
   untyped ink outbound port, a trace routed by the same rules to the nearest
   boundary, a solid segment on the rule, and a filled square outside it,
   labelled with its host bindings when ports are published.
-- State is carried by line work and small-caps labels — dashed wireframes,
-  faded ink, `STARTING`, `UNHEALTHY`, `EXITED n`, `MISSING` — never by
-  recolouring modules.
+- Component state is carried by line work and small-caps labels — dashed
+  wireframes, faded ink, `STARTING`, `UNHEALTHY`, `EXITED n`, `MISSING` —
+  never by recolouring modules. Link colour reports connection state only.
 
 Click a component or link for its descriptor; drag to pan, scroll to zoom,
 Escape to return to the system summary. The page polls the view API every
