@@ -4,6 +4,9 @@ component echo echo
 component uppercase uppercase
 component caller caller
 
+publish uppercase tcp 127.0.0.1 8080 8080
+egress uppercase
+
 link uppercase.upstream echo.echo
-args caller --wait
+args caller --repeat 750ms dcomp-demo
 link caller.upstream uppercase.echo
