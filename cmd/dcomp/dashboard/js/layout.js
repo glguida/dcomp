@@ -3,8 +3,38 @@
    tightened so every module presses against its earliest consumer; rows are
    ordered by barycenter and columns slide toward what they are wired to. */
 
-import { HUES } from "./iso.js";
+import { HUES, TX, TY } from "./iso.js";
 import { routeAll } from "./router.js";
+
+const PORT_STEP = 2;
+const PORT_LABEL_FONT_SIZE = 9;
+const COMPONENT_LABEL_FONT_SIZE = 13;
+const MONO_GLYPH_WIDTH = 0.62;
+const ISO_EDGE_LENGTH = Math.hypot(TX, TY);
+
+function portSpan(count) {
+  return Math.max(0, count - 1) * PORT_STEP;
+}
+
+function portLabelMargin(names) {
+  const longest = names.reduce((length, name) =>
+    Math.max(length, String(name).length), 0);
+  const halfText = longest * PORT_LABEL_FONT_SIZE * MONO_GLYPH_WIDTH / 2;
+  return Math.max(1, (halfText + 10) / ISO_EDGE_LENGTH);
+}
+
+function faceLength(minimum, names) {
+  return Math.ceil(Math.max(
+    minimum,
+    portSpan(names.length) + 2 * portLabelMargin(names),
+  ));
+}
+
+function componentLabelWidth(name) {
+  const text = String(name).length * COMPONENT_LABEL_FONT_SIZE *
+    MONO_GLYPH_WIDTH;
+  return Math.ceil((text + 28) / ISO_EDGE_LENGTH);
+}
 
 export function layout(doc) {
   const components = (doc.components || []).slice()
@@ -14,8 +44,9 @@ export function layout(doc) {
      faces the camera can see. Width follows inputs, depth follows outputs,
      and every tile is large enough that no port sits near a corner. */
   components.forEach((component, index) => {
-    const eastSlots = (component.outputs || []).length +
-      ((component.published_ports || []).length ? 1 : 0);
+    const inputNames = (component.inputs || []).map(endpoint => endpoint.name);
+    const outputNames = (component.outputs || []).map(endpoint => endpoint.name);
+    if ((component.published_ports || []).length) outputNames.push("publish");
     /* A hazard-taped box needs face room between tape and module for its
        silkscreened name, so external reach raises the minimum size. */
     const minimum = component.egress ||
@@ -24,8 +55,11 @@ export function layout(doc) {
       spec: component,
       hue: HUES[index % 4],
       layer: 0,
-      w: Math.max(minimum, (component.inputs || []).length + 2),
-      h: Math.max(minimum, eastSlots + 2),
+      w: Math.max(
+        faceLength(minimum, inputNames),
+        componentLabelWidth(component.name),
+      ),
+      h: faceLength(minimum, outputNames),
       x: 0,
       y: 0,
     });
@@ -188,23 +222,25 @@ export function layout(doc) {
     node.inputs = new Map();
     node.outputs = new Map();
     const inputs = node.spec.inputs || [];
-    const inputStart = (node.w - (inputs.length - 1)) / 2;
+    const inputSpan = portSpan(inputs.length);
+    const inputStart = (node.w - inputSpan) / 2;
     inputs.forEach((endpoint, index) => {
       node.inputs.set(endpoint.name,
-        { x: node.x + inputStart + index, y: node.y + node.h });
+        { x: node.x + inputStart + index * PORT_STEP, y: node.y + node.h });
     });
     const outputs = node.spec.outputs || [];
     const published = (node.spec.published_ports || []).length !== 0;
     const eastSlots = outputs.length + (published ? 1 : 0);
-    const eastStart = (node.h - (eastSlots - 1)) / 2;
+    const eastSpan = portSpan(eastSlots);
+    const eastStart = (node.h - eastSpan) / 2;
     outputs.forEach((endpoint, index) => {
       node.outputs.set(endpoint.name,
-        { x: node.x + node.w, y: node.y + eastStart + index });
+        { x: node.x + node.w, y: node.y + eastStart + index * PORT_STEP });
     });
     if (published) {
       node.publishPort = {
         x: node.x + node.w,
-        y: node.y + eastStart + outputs.length,
+        y: node.y + eastStart + outputs.length * PORT_STEP,
       };
     }
   }

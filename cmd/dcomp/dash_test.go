@@ -45,6 +45,10 @@ func TestDashServesEmbeddedPage(t *testing.T) {
 	if !strings.Contains(recorder.Body.String(), "dcomp · system view") {
 		t.Fatalf("page body does not look like the viewer")
 	}
+	if strings.Contains(recorder.Body.String(), "API 1") ||
+		!strings.Contains(recorder.Body.String(), `id="api-version"`) {
+		t.Fatalf("page hardcodes a stale API version")
+	}
 }
 
 func TestDashSystemsAndViewDocuments(t *testing.T) {

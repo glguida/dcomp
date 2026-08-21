@@ -1,14 +1,18 @@
 /* Shell: the fetch loop, system tabs, connectivity word, and the camera.
-   The stage is redrawn only when the observed document changes. */
+   Every observation redraws the stage so measured activity can cool even
+   when the underlying cumulative counters stop changing. */
 
 import { state } from "./state.js";
 import { render, applyViewBox } from "./render.js";
+import { observeLinkActivity } from "./activity.js";
 
 async function fetchSystems() {
   try {
     const response = await fetch("/api/v2/systems");
     if (!response.ok) throw new Error(response.statusText);
     const body = await response.json();
+    document.getElementById("api-version").textContent =
+      Number.isInteger(body.api_version) ? "API " + body.api_version : "API ?";
     state.systems = body.systems || [];
     if (!state.current && state.systems.length) {
       state.current = state.systems[0];
@@ -26,13 +30,15 @@ async function fetchView() {
       "/api/v2/view/" + encodeURIComponent(state.current));
     if (!response.ok) throw new Error(response.statusText);
     const text = await response.text();
+    const view = JSON.parse(text);
+    state.linkActivity = observeLinkActivity(
+      state.linkActivity, view, Date.now(),
+    );
     state.lost = false;
     state.lastSeen = Date.now();
-    if (text !== state.rendered) {
-      state.rendered = text;
-      state.doc = JSON.parse(text);
-      render();
-    }
+    state.rendered = text;
+    state.doc = view;
+    render();
     renderObserving();
   } catch (error) {
     state.lost = true;
@@ -52,6 +58,7 @@ function renderTabs() {
       state.selection = null;
       state.viewBox = null;
       state.rendered = "";
+      state.linkActivity = new Map();
       renderTabs();
       fetchView();
     };

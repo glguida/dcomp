@@ -72,14 +72,16 @@ function systemPanel(doc) {
     '<div class="legend">' +
     legendGlyph("input") + "INPUT — OPEN SQUARE<br>" +
     legendGlyph("output") + "OUTPUT — FILLED SQUARE<br>" +
-    legendGlyph("link") + "LINK — PRIVATE CHANNEL<br>" +
-    legendGlyph("beads") + "BEADS — OBSERVED TRAFFIC<br>" +
+    legendGlyph("active-link") + "GREEN LINK — CONNECTED<br>" +
+    legendGlyph("link") + "BLACK LINK — DISCONNECTED<br>" +
+    legendGlyph("beads") + "BEADS — MEASURED BYTE RATE<br>" +
     legendGlyph("dashed") + "INTERNAL BOUNDARY<br>" +
     legendGlyph("striped") + "HAZARD RING — EXTERNAL REACH<br>" +
     legendGlyph("solid") + "SOLID RULE — PUBLISHED ENTRY" +
     "</div>" +
     '<div class="rule"></div>' +
-    '<div class="legend">COLOUR NAMES MODULES,<br>NEVER STATES.</div>';
+    '<div class="legend">MODULE COLOUR NAMES MODULES.<br>' +
+    "LINK COLOUR SHOWS CONNECTIVITY.</div>";
 }
 
 function legendGlyph(kind) {
@@ -94,6 +96,10 @@ function legendGlyph(kind) {
   if (kind === "link") {
     return '<svg width="14" height="14"><line x1="0" y1="7" x2="14" y2="7" ' +
       'stroke="#201A12" stroke-width="2"/></svg>';
+  }
+  if (kind === "active-link") {
+    return '<svg width="14" height="14"><line x1="0" y1="7" x2="14" y2="7" ' +
+      'stroke="#3E7C5A" stroke-width="2"/></svg>';
   }
   if (kind === "beads") {
     return '<svg width="14" height="14"><line x1="0" y1="7" x2="14" y2="7" ' +
@@ -172,8 +178,19 @@ function linkPanel(route) {
     "output    " + link.output.component + "." + link.output.endpoint,
     "service   " + link.service,
   ];
+  if (typeof link.active === "boolean") {
+    lines.push("active    " + (link.active ? "yes" : "no"));
+  }
+  if (link.active_connections !== undefined) {
+    lines.push("streams   " + link.active_connections);
+  }
   if (link.activity) {
-    lines.push("active    " + link.activity.active_connections);
+    lines.push("in -> out " + link.activity.bytes_input_to_output + " bytes");
+    lines.push("out -> in " + link.activity.bytes_output_to_input + " bytes");
+    const observed = state.linkActivity.get(route.id);
+    if (observed) {
+      lines.push("rate      " + Math.round(observed.bytesPerSecond) + " B/s");
+    }
   }
   return '<h2>LINK</h2>' +
     '<div class="descriptor">' + escapeText(lines.join("\n")) + "</div>" +

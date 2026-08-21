@@ -10,4 +10,5 @@ export const state = {
   lastSeen: 0,
   viewBox: null,
   dragged: false,
+  linkActivity: new Map(),
 };

@@ -136,7 +136,10 @@ footer .feet {
 }
 @keyframes dcomp-march { to { stroke-dashoffset: -20; } }
 @keyframes dcomp-blink { 0%, 55% { opacity: 1; } 56%, 100% { opacity: 0; } }
-.march { animation: dcomp-march 1.6s linear infinite; }
+.march {
+  animation: dcomp-march var(--bead-period, 1.6s) linear infinite;
+  animation-delay: var(--bead-delay, 0s);
+}
 .blink { animation: dcomp-blink 1.2s steps(1) infinite; }
 text { font-family: var(--sans); fill: var(--inchiostro); }
 .hit { cursor: pointer; }

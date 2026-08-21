@@ -78,16 +78,17 @@ export function routeAll(byName, links, bounds, egressRequests) {
     if (!from || !to) continue;
     const start = { x: from.x * scale, y: from.y * scale };
     const goal = { x: to.x * scale, y: to.y * scale };
+    const net = link.output.component + "." + link.output.endpoint;
     world.foreignPorts = new Set(portCells);
     world.foreignPorts.delete(world.key(start.x, start.y));
     world.foreignPorts.delete(world.key(goal.x, goal.y));
     world.range = enclosure;
     world.beyond = null;
-    const cells = routeOne(start, goal, world);
+    const cells = routeOne(start, goal, world, net);
     if (!cells) continue;
     const id = link.input.component + "." + link.input.endpoint +
       "<-" + link.output.component + "." + link.output.endpoint;
-    const crossings = markRoute(world, cells, id);
+    const crossings = markRoute(world, cells, net);
     routes.push({ link, id, cells, crossings });
   }
 
@@ -104,9 +105,9 @@ export function routeAll(byName, links, bounds, egressRequests) {
     world.foreignPorts.delete(world.key(start.x, start.y));
     world.range = extended;
     world.beyond = enclosure;
-    const cells = routeOne(start, goal, world);
-    if (!cells) continue;
     const id = request.type + ":" + node.spec.name;
+    const cells = routeOne(start, goal, world, id);
+    if (!cells) continue;
     const crossings = markRoute(world, cells, id);
     external.push({ node, id, cells, crossings, type: request.type,
       west: request.west, markY: request.markY, outside: request.outside });
@@ -114,17 +115,19 @@ export function routeAll(byName, links, bounds, egressRequests) {
   return { routes, external };
 }
 
-function markRoute(world, cells, id) {
+function markRoute(world, cells, net) {
   const crossings = [];
   for (let index = 1; index < cells.length - 1; index++) {
     const before = cells[index - 1];
     const cell = cells[index];
     const after = cells[index + 1];
     const entry = world.occupied.get(world.key(cell.x, cell.y)) || {};
-    if (before.y === cell.y && after.y === cell.y && entry.v) {
+    if (before.y === cell.y && after.y === cell.y &&
+        entry.v && entry.v !== net) {
       crossings.push({ x: cell.x, y: cell.y, horizontal: true });
     }
-    if (before.x === cell.x && after.x === cell.x && entry.h) {
+    if (before.x === cell.x && after.x === cell.x &&
+        entry.h && entry.h !== net) {
       crossings.push({ x: cell.x, y: cell.y, horizontal: false });
     }
   }
@@ -135,14 +138,14 @@ function markRoute(world, cells, id) {
     for (const marked of [before, cell]) {
       const cellKey = world.key(marked.x, marked.y);
       const entry = world.occupied.get(cellKey) || {};
-      entry[orientation] = id;
+      entry[orientation] = net;
       world.occupied.set(cellKey, entry);
     }
   }
   return crossings;
 }
 
-function routeOne(start, goal, world) {
+function routeOne(start, goal, world, net) {
   const moves = [
     { dx: 1, dy: 0, o: "h" }, { dx: -1, dy: 0, o: "h" },
     { dx: 0, dy: 1, o: "v" }, { dx: 0, dy: -1, o: "v" },
@@ -173,13 +176,14 @@ function routeOne(start, goal, world) {
       if (!terminal && world.blocked.has(cellKey)) continue;
       if (!terminal && world.foreignPorts.has(cellKey)) continue;
       const entry = world.occupied.get(cellKey) || {};
-      if (entry[move.o]) continue;
+      if (entry[move.o] && entry[move.o] !== net) continue;
       let cost = current.cost + 1 + (world.penalty.get(cellKey) || 0);
       if (world.beyond &&
           (nx < world.beyond.minX || nx > world.beyond.maxX ||
            ny < world.beyond.minY || ny > world.beyond.maxY)) cost += 6;
       if (move.o !== current.o) cost += 3;
-      if (entry[move.o === "h" ? "v" : "h"]) cost += 9;
+      const crossing = entry[move.o === "h" ? "v" : "h"];
+      if (crossing && crossing !== net) cost += 9;
       const key = stateKey(nx, ny, move.o);
       if ((best.get(key) ?? Infinity) <= cost) continue;
       best.set(key, cost);

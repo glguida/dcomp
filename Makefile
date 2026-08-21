@@ -28,6 +28,7 @@ build:
 
 test:
 	$(GO) test ./...
+	$(NODE) --test cmd/dcomp/dashboardtest/*.test.js
 	$(MAKE) sdk-test
 	tools/install-test
 
