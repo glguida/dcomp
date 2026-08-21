@@ -196,7 +196,7 @@ function renderEnclosure(svg, plan) {
     parts.push('<polygon points="' +
       pts(surfaceQuad("top", [sx, sy], -4, 4, -4, 4)) +
       '" fill="' + CARTA + '" stroke="' + INK + '" stroke-width="2"/>');
-    const text = (external.node.spec.published_ports || []).map(p =>
+    const text = external.node.publishedPorts.map(p =>
       p.host_ip + ":" + p.host_port + "→" + p.container_port +
       "/" + p.protocol).join(" · ");
     parts.push(surfaceText("top", [sx, sy], text, {
@@ -356,7 +356,7 @@ function renderNode(svg, node) {
      blocks close around the coloured module. Keeping the tape away from the
      block edge leaves a dedicated, quiet band for interface names.
      Outbound egress and inbound publish both count as reach. */
-  if (node.spec.egress || (node.spec.published_ports || []).length) {
+  if (node.spec.egress || node.publishedPorts.length) {
     const hazardGap = 0.2;
     hazardRing(group,
       cx - moduleX - hazardGap,
@@ -381,7 +381,7 @@ function renderNode(svg, node) {
   /* The name is silkscreened into the block's top-left inset. Its baseline
      follows the top face; layout reserves enough edge length for the text.
      The status word stays a billboard flag at the apex. */
-  const taped = node.spec.egress || (node.spec.published_ports || []).length;
+  const taped = node.spec.egress || node.publishedPorts.length;
   const [ax, ay] = iso(x + 0.38, y + 0.38, 1);
   const size = Math.min(13, Math.max(9,
     Math.round(((h / 2 - moduleY) - (taped ? 0.35 : 0.1)) * 40)));

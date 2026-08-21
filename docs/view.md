@@ -33,7 +33,11 @@ Top-level fields:
 Each component carries its declared interface and bounded runtime policy —
 `inputs` and `outputs` (local name plus nominal service), `egress`, `binds`,
 `volumes`, `args`, `published_ports` — and, in `state` mode, a `status`
-object with `container_id`, `status`, `health`, `exit_code`, and `problem`.
+object with `container_id`, `status`, `health`, `exit_code`, `problem`, and
+`published_ports`. Top-level published ports are the declared policy; status
+published ports are Docker's effective host bindings. The dashboard displays
+the effective bindings when available, so a dynamic declared host port of `0`
+becomes the allocated host port after the container starts.
 Each link carries its `input` and `output` endpoint references and the linked
 `service`. A live proxy observation additionally carries `active`, the exact
 `active_connections` gauge, and cumulative directional counters under

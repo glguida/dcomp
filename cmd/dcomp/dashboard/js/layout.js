@@ -36,6 +36,12 @@ function componentLabelWidth(name) {
   return Math.ceil((text + 28) / ISO_EDGE_LENGTH);
 }
 
+function displayedPublishedPorts(component) {
+  const observed = component.status && component.status.published_ports;
+  if (Array.isArray(observed) && observed.length) return observed;
+  return component.published_ports || [];
+}
+
 export function layout(doc) {
   const components = (doc.components || []).slice()
     .sort((a, b) => a.name < b.name ? -1 : 1);
@@ -46,13 +52,14 @@ export function layout(doc) {
   components.forEach((component, index) => {
     const inputNames = (component.inputs || []).map(endpoint => endpoint.name);
     const outputNames = (component.outputs || []).map(endpoint => endpoint.name);
-    if ((component.published_ports || []).length) outputNames.push("publish");
+    const publishedPorts = displayedPublishedPorts(component);
+    if (publishedPorts.length) outputNames.push("publish");
     /* A hazard-taped box needs face room between tape and module for its
        silkscreened name, so external reach raises the minimum size. */
-    const minimum = component.egress ||
-      (component.published_ports || []).length ? 4 : 3;
+    const minimum = component.egress || publishedPorts.length ? 4 : 3;
     byName.set(component.name, {
       spec: component,
+      publishedPorts,
       hue: HUES[index % 4],
       layer: 0,
       w: Math.max(
@@ -229,7 +236,7 @@ export function layout(doc) {
         { x: node.x + inputStart + index * PORT_STEP, y: node.y + node.h });
     });
     const outputs = node.spec.outputs || [];
-    const published = (node.spec.published_ports || []).length !== 0;
+    const published = node.publishedPorts.length !== 0;
     const eastSlots = outputs.length + (published ? 1 : 0);
     const eastSpan = portSpan(eastSlots);
     const eastStart = (node.h - eastSpan) / 2;

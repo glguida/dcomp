@@ -62,3 +62,47 @@ test("component names reserve enough top-edge width", () => {
       plan.byName.get("a").w,
   );
 });
+
+test("live Docker bindings replace a dynamic published-port request", () => {
+  const declared = [{
+    protocol: "tcp", host_ip: "127.0.0.1", host_port: 0,
+    container_port: 8080,
+  }];
+  const observed = [{
+    protocol: "tcp", host_ip: "127.0.0.1", host_port: 49152,
+    container_port: 8080,
+  }];
+  const document = {
+    components: [{
+      name: "service", inputs: [], outputs: [], published_ports: declared,
+      status: { published_ports: observed },
+    }],
+    links: [],
+  };
+
+  assert.deepEqual(
+    layout(document).byName.get("service").publishedPorts,
+    observed,
+  );
+});
+
+test("declared bindings remain visible before Docker allocates a port", () => {
+  const declared = [{
+    protocol: "tcp", host_ip: "127.0.0.1", host_port: 0,
+    container_port: 8080,
+  }];
+
+  for (const status of [undefined, { published_ports: [] }]) {
+    const document = {
+      components: [{
+        name: "service", inputs: [], outputs: [],
+        published_ports: declared, status,
+      }],
+      links: [],
+    };
+    assert.deepEqual(
+      layout(document).byName.get("service").publishedPorts,
+      declared,
+    );
+  }
+});

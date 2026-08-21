@@ -38,7 +38,7 @@ function externalPanel(node, kind) {
   } else {
     lines.push("publish   " + spec.name);
     lines.push("grants    inbound connections from each host binding");
-    for (const port of spec.published_ports || []) {
+    for (const port of node.publishedPorts) {
       lines.push("binding   " + port.protocol + " " + port.host_ip + ":" +
         port.host_port + " -> " + port.container_port);
     }
@@ -156,7 +156,7 @@ function componentPanel(node) {
       (volume.read_only ? " ro" : " rw"));
   }
   if ((spec.args || []).length) lines.push("args      " + spec.args.join(" "));
-  for (const port of spec.published_ports || []) {
+  for (const port of node.publishedPorts) {
     lines.push("publish   " + port.protocol + " " + port.host_ip + ":" +
       port.host_port + " -> " + port.container_port);
   }

@@ -130,6 +130,13 @@ func TestViewFromStatusJoinsTopologyAndObservation(t *testing.T) {
 				Name:     "filter",
 				ImageRef: "example/filter:1",
 				ImageID:  "sha256:abcd",
+				Runtime: composition.Runtime{
+					ExternalEgress: true,
+					Ports: []composition.PublishedPort{{
+						Protocol: "tcp", HostIP: "127.0.0.1",
+						HostPort: 0, ContainerPort: 8080,
+					}},
+				},
 				Definition: composition.Definition{
 					Inputs: []composition.Endpoint{
 						{Name: "documents", Service: "example.document.v1.Documents"},
@@ -172,7 +179,14 @@ func TestViewFromStatusJoinsTopologyAndObservation(t *testing.T) {
 			}},
 		},
 		Components: []lifecycle.ComponentStatus{
-			{Name: "filter", ID: "c1", Status: "running", Health: engine.HealthHealthy},
+			{
+				Name: "filter", ID: "c1", Status: "running",
+				Health: engine.HealthHealthy,
+				PublishedPorts: []engine.PortBinding{{
+					Protocol: engine.ProtocolTCP, HostIP: "127.0.0.1",
+					HostPort: 49152, ContainerPort: 8080,
+				}},
+			},
 			{Name: "source", ID: "c2", Status: "exited", ExitCode: 3},
 		},
 	}
@@ -194,6 +208,13 @@ func TestViewFromStatusJoinsTopologyAndObservation(t *testing.T) {
 		filter.Status.Status != "running" ||
 		filter.Status.Health != string(engine.HealthHealthy) {
 		t.Fatalf("filter = %+v", filter)
+	}
+	if len(filter.PublishedPorts) != 1 || filter.PublishedPorts[0].HostPort != 0 {
+		t.Fatalf("filter declared ports = %+v", filter.PublishedPorts)
+	}
+	if len(filter.Status.PublishedPorts) != 1 ||
+		filter.Status.PublishedPorts[0].HostPort != 49152 {
+		t.Fatalf("filter effective ports = %+v", filter.Status.PublishedPorts)
 	}
 	source := document.Components[1]
 	if source.Status == nil || source.Status.Status != "exited" ||
