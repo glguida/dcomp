@@ -17,52 +17,28 @@ single-host, and intentionally has no cluster control plane.
 
 ## Description files
 
-A `component.dcomp` declares an existing image and locally named interfaces:
+A `component.dcomp` declares an existing image and its locally named
+interfaces. A `system.dcomp` creates instances and links every input to one
+compatible output:
 
 ```text
+# components/filter/component.dcomp
 docker example/filter:1
 input example.document.v1.Documents documents
 output example.document.v1.Documents filtered
-```
 
-An input or output line is:
-
-```text
-input PROTOBUF_SERVICE LOCAL_NAME
-output PROTOBUF_SERVICE LOCAL_NAME
-```
-
-The nominal service identifier must match across a link. DComp does not load
-protobuf descriptors or inspect application messages; other stream protocols
-may use the same declaration mechanism.
-
-A `system.dcomp` creates instances and wires each input to one output:
-
-```text
+# system.dcomp
 system document-system
-
 component source components/source
 component filter components/filter
-
 link filter.documents source.documents
 ```
 
-Every input must be linked exactly once. Outputs may be unused or fan out to
-several inputs, and cycles are valid.
-
-The existing bounded runtime directives remain available:
-
-```text
-bind filter ./filter.conf /etc/filter.conf ro
-volume filter cache /var/lib/filter rw
-args filter serve --strict
-publish filter tcp 127.0.0.1 8080 8080
-egress filter
-```
-
-`publish` and `egress` apply to non-DComp services a component intentionally
-exposes. Declared DComp interfaces never use published TCP ports. User mounts
-may not overlap the reserved `/run/dcomp` tree.
+The nominal service identifier must match across a link, but DComp does not
+inspect schemas or payloads. System files can additionally declare bounded
+binds, persistent volumes, arguments, published non-DComp ports, and egress.
+See the [CLI and description-file reference](docs/reference.md) for the exact
+grammar, path rules, validation, and command behavior.
 
 ## Component contract
 
@@ -81,39 +57,17 @@ Components must not bind or listen on these interface paths. The removed
 0.1 contract—`DCOMP_LINK_*`, Docker DNS, and fixed port `50051`—is not
 supported by 0.2 components.
 
-The repository ships small component helpers for Go, Python, and Node.js. All
-three validate the same environment contract and connect as clients; none
-binds a DComp interface path. The Go/gRPC helper implements the output side
-with a listener adapter over proxy connections:
-
-```go
-target, err := component.InputTarget("upstream")
-if err != nil {
-    log.Fatal(err)
-}
-connection, err := grpc.Dial(
-    target,
-    grpc.WithTransportCredentials(insecure.NewCredentials()),
-)
-
-server, err := component.NewServer(component.WithOutput("filtered"))
-examplev1.RegisterDocumentsServer(server, implementation)
-err = server.Serve(ctx)
-```
-
-The dependency-free [Python](sdk/python/README.md) and
-[Node.js](sdk/node/README.md) packages live in `sdk/python` and `sdk/node`.
-Python exposes raw connections and a `DialListener`; Node exposes raw
-connections, Unix HTTP client options, and an adapter for native
-`net.Server`/`http.Server` instances. They deliberately contain no protobuf
-or RPC dependency, so applications can layer gRPC, ConnectRPC, HTTP, or
-another stream protocol on top.
+The repository ships helpers for Go/gRPC, dependency-free
+[Python](sdk/python/README.md), and dependency-free
+[Node.js](sdk/node/README.md). All validate the same address contract and
+connect as clients; none binds a DComp interface path. The language guides
+describe their framework boundaries and shutdown/reconnection behavior.
 
 Images must still declare a meaningful Docker `HEALTHCHECK`. The bundled
 `dcomp-healthcheck --socket PATH` can verify that an orchestrator-owned socket
 is mounted; applications may provide a stronger protocol-specific check.
 
-See [Component Contract](docs/component-contract.md) for the complete image,
+See [Component contract](docs/component-contract.md) for the complete image,
 filesystem, shutdown, and runtime-policy rules.
 
 ## Proxy data plane
@@ -153,6 +107,18 @@ components may reconnect without restarting the proxy.
 The proxy creates every listener before reporting readiness. `dcomp up` waits
 for that readiness before creating or starting component containers.
 
+## Documentation
+
+- [CLI and description-file reference](docs/reference.md)
+- [Machine API 2](docs/machine-api.md)
+- [Component contract](docs/component-contract.md)
+- [Architecture](docs/architecture.md)
+- [Lifecycle and recovery](docs/lifecycle.md)
+- [Worked examples](examples/README.md)
+- [Python component helpers](sdk/python/README.md)
+- [Node.js component helpers](sdk/node/README.md)
+- [Prior art](docs/prior-art.md)
+
 ## Build and install
 
 Requirements are Go 1.25 or newer, Linux, and a local Docker Engine with API
@@ -180,40 +146,22 @@ make integration
 
 ## CLI
 
-```text
-dcomp version [--json]
-dcomp [--state-root DIR] [--runtime-root DIR] check FILE
-dcomp [--state-root DIR] [--runtime-root DIR] up FILE
-dcomp [--state-root DIR] [--runtime-root DIR] status [--json] NAME
-dcomp [--state-root DIR] [--runtime-root DIR] ps [-a|--all] [--json] [NAME]
-dcomp [--state-root DIR] [--runtime-root DIR] volume [--json] SYSTEM COMPONENT LOGICAL
-dcomp [--state-root DIR] [--runtime-root DIR] logs [-f|--follow] NAME [COMPONENT...]
-dcomp [--state-root DIR] [--runtime-root DIR] attach [--ready-fd FD] SYSTEM COMPONENT
-dcomp [--state-root DIR] [--runtime-root DIR] restart NAME [COMPONENT...]
-dcomp [--state-root DIR] [--runtime-root DIR] down NAME
-dcomp [--state-root DIR] [--runtime-root DIR] resume NAME
-dcomp [--state-root DIR] [--runtime-root DIR] abort NAME
-dcomp [--state-root DIR] [--runtime-root DIR] inspect-image IMAGE
+The common workflow is deliberately small:
+
+```sh
+dcomp check system.dcomp
+dcomp up system.dcomp
+dcomp status document-system
+dcomp logs -f document-system
+dcomp restart document-system filter
+dcomp down document-system
 ```
-
-`check` parses and resolves images without changing Docker or host state.
-`up` starts the proxy, creates dedicated bridges only for components that
-declare `egress`, mounts endpoint sockets, and starts components. Other
-components run with Docker network mode `none`. `down` stops and removes
-components first, then stops the proxy and removes transient egress networks;
-named volumes survive.
-
-`status` reports proxy readiness and connection counts alongside component
-and network diagnostics. While an operation is pending, it also separates
-previous-generation components and networks that still await retirement.
-`logs` includes proxy records under the source name `@proxy`; pass `@proxy`
-explicitly to select only that stream. Machine-readable documents use API
-version 2; pending status may add `retiring_components` and
-`retiring_networks` fields.
 
 Lifecycle operations are durable. If a command is interrupted, `resume`
 continues its exact recorded operation and `abort` removes verified new
-resources when safe. See [Lifecycle](docs/lifecycle.md).
+resources when safe. The [CLI and description-file reference](docs/reference.md)
+covers every command, flag, exit status, environment override, and authored
+directive. Automation should use [Machine API 2](docs/machine-api.md).
 
 ## State and identity
 

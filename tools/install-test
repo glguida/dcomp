@@ -32,7 +32,12 @@ usr/share/doc/dcomp/docs/assets/pettine.svg
 usr/share/doc/dcomp/docs/assets/simbolo.svg
 usr/share/doc/dcomp/docs/component-contract.md
 usr/share/doc/dcomp/docs/lifecycle.md
+usr/share/doc/dcomp/docs/machine-api.md
 usr/share/doc/dcomp/docs/prior-art.md
+usr/share/doc/dcomp/docs/reference.md
+usr/share/doc/dcomp/examples/README.md
+usr/share/doc/dcomp/sdk/node/README.md
+usr/share/doc/dcomp/sdk/python/README.md
 EOF
 
 (cd "$stage" && find . -type f -print) |
@@ -66,7 +71,11 @@ done <"$expected"
 for directory in \
     "$stage/usr/share/doc/dcomp" \
     "$stage/usr/share/doc/dcomp/docs" \
-    "$stage/usr/share/doc/dcomp/docs/assets"
+    "$stage/usr/share/doc/dcomp/docs/assets" \
+    "$stage/usr/share/doc/dcomp/examples" \
+    "$stage/usr/share/doc/dcomp/sdk" \
+    "$stage/usr/share/doc/dcomp/sdk/node" \
+    "$stage/usr/share/doc/dcomp/sdk/python"
 do
     [ "$(stat -c '%a' "$directory")" = 755 ] || {
         echo "install-test: directory has wrong mode: $directory" >&2

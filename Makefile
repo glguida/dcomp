@@ -82,12 +82,20 @@ install:
 	$(INSTALL) -m 0644 docs/architecture.md "$(DESTDIR)$(DOCDIR)/docs/architecture.md"
 	$(INSTALL) -m 0644 docs/component-contract.md "$(DESTDIR)$(DOCDIR)/docs/component-contract.md"
 	$(INSTALL) -m 0644 docs/lifecycle.md "$(DESTDIR)$(DOCDIR)/docs/lifecycle.md"
+	$(INSTALL) -m 0644 docs/machine-api.md "$(DESTDIR)$(DOCDIR)/docs/machine-api.md"
 	$(INSTALL) -m 0644 docs/prior-art.md "$(DESTDIR)$(DOCDIR)/docs/prior-art.md"
+	$(INSTALL) -m 0644 docs/reference.md "$(DESTDIR)$(DOCDIR)/docs/reference.md"
 	[ -d "$(DESTDIR)$(DOCDIR)/docs/assets" ] || $(INSTALL) -d -m 0755 "$(DESTDIR)$(DOCDIR)/docs/assets"
 	$(INSTALL) -m 0644 docs/assets/banner.svg "$(DESTDIR)$(DOCDIR)/docs/assets/banner.svg"
 	$(INSTALL) -m 0644 docs/assets/legame.svg "$(DESTDIR)$(DOCDIR)/docs/assets/legame.svg"
 	$(INSTALL) -m 0644 docs/assets/pettine.svg "$(DESTDIR)$(DOCDIR)/docs/assets/pettine.svg"
 	$(INSTALL) -m 0644 docs/assets/simbolo.svg "$(DESTDIR)$(DOCDIR)/docs/assets/simbolo.svg"
+	[ -d "$(DESTDIR)$(DOCDIR)/sdk/python" ] || $(INSTALL) -d -m 0755 "$(DESTDIR)$(DOCDIR)/sdk/python"
+	[ -d "$(DESTDIR)$(DOCDIR)/sdk/node" ] || $(INSTALL) -d -m 0755 "$(DESTDIR)$(DOCDIR)/sdk/node"
+	$(INSTALL) -m 0644 sdk/python/README.md "$(DESTDIR)$(DOCDIR)/sdk/python/README.md"
+	$(INSTALL) -m 0644 sdk/node/README.md "$(DESTDIR)$(DOCDIR)/sdk/node/README.md"
+	[ -d "$(DESTDIR)$(DOCDIR)/examples" ] || $(INSTALL) -d -m 0755 "$(DESTDIR)$(DOCDIR)/examples"
+	$(INSTALL) -m 0644 examples/README.md "$(DESTDIR)$(DOCDIR)/examples/README.md"
 
 uninstall:
 	rm -f "$(DESTDIR)$(BINDIR)/dcomp"
@@ -98,13 +106,22 @@ uninstall:
 	rm -f "$(DESTDIR)$(DOCDIR)/docs/architecture.md"
 	rm -f "$(DESTDIR)$(DOCDIR)/docs/component-contract.md"
 	rm -f "$(DESTDIR)$(DOCDIR)/docs/lifecycle.md"
+	rm -f "$(DESTDIR)$(DOCDIR)/docs/machine-api.md"
 	rm -f "$(DESTDIR)$(DOCDIR)/docs/prior-art.md"
+	rm -f "$(DESTDIR)$(DOCDIR)/docs/reference.md"
 	rm -f "$(DESTDIR)$(DOCDIR)/docs/assets/banner.svg"
 	rm -f "$(DESTDIR)$(DOCDIR)/docs/assets/legame.svg"
 	rm -f "$(DESTDIR)$(DOCDIR)/docs/assets/pettine.svg"
 	rm -f "$(DESTDIR)$(DOCDIR)/docs/assets/simbolo.svg"
+	rm -f "$(DESTDIR)$(DOCDIR)/sdk/python/README.md"
+	rm -f "$(DESTDIR)$(DOCDIR)/sdk/node/README.md"
+	rm -f "$(DESTDIR)$(DOCDIR)/examples/README.md"
 	rmdir "$(DESTDIR)$(DOCDIR)/docs/assets" 2>/dev/null || true
 	rmdir "$(DESTDIR)$(DOCDIR)/docs" 2>/dev/null || true
+	rmdir "$(DESTDIR)$(DOCDIR)/sdk/python" 2>/dev/null || true
+	rmdir "$(DESTDIR)$(DOCDIR)/sdk/node" 2>/dev/null || true
+	rmdir "$(DESTDIR)$(DOCDIR)/sdk" 2>/dev/null || true
+	rmdir "$(DESTDIR)$(DOCDIR)/examples" 2>/dev/null || true
 	rmdir "$(DESTDIR)$(DOCDIR)" 2>/dev/null || true
 
 clean:

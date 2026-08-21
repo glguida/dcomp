@@ -101,6 +101,10 @@ therefore intended for client-first protocols such as HTTP and gRPC.
 Server-first protocols can use the raw `connect_output()`/`connectOutput()`
 helpers and manage their connection pool explicitly.
 
+See the complete [Python helper guide](../sdk/python/README.md) and
+[Node.js helper guide](../sdk/node/README.md) for raw connections, framework
+boundaries, reconnection, multiple outputs, and shutdown examples.
+
 ### Go/gRPC
 
 The `component` package validates addresses and adapts a gRPC server to the
