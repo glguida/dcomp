@@ -65,7 +65,8 @@ func (controller *Controller) executeAbort(
 		controller.report("aborted %s for %s", operation.Kind, operation.Target.Name)
 		return nil
 	}
-	plans, err := resolvedTopology(operation.Target)
+	scope := controller.dockerScope(operation.Target.Name)
+	plans, err := resolvedTopology(scope, operation.Target)
 	if err != nil {
 		return err
 	}
@@ -84,7 +85,7 @@ func (controller *Controller) executeAbort(
 	for _, component := range operation.Target.Components {
 		actual, inspectErr := controller.inspectContainer(
 			ctx,
-			containerName(operation.Target.Name, component.Name),
+			containerName(scope, component.Name),
 		)
 		if errors.Is(inspectErr, engine.ErrNotFound) {
 			continue
@@ -168,7 +169,7 @@ func (controller *Controller) executeAbort(
 			)
 		}
 		if err := verifyContainerCore(
-			operation.Target.Name,
+			scope,
 			runtimeDirectory(operation.RuntimeRoot, operation.Target.Name),
 			component,
 			resource,
@@ -199,7 +200,7 @@ func (controller *Controller) executeAbort(
 			)
 		}
 		if err := verifyNetwork(
-			operation.Target.Name,
+			scope,
 			plan,
 			resource,
 			actual,
@@ -373,6 +374,7 @@ func (controller *Controller) executeDown(
 	if operation.Previous == nil {
 		return fmt.Errorf("down operation has no committed deployment")
 	}
+	scope := controller.dockerScope(operation.Target.Name)
 	if err := controller.recoverRetiredPreviousEndpoints(ctx, operation); err != nil {
 		return fmt.Errorf("recover network endpoints before down: %w", err)
 	}
@@ -414,7 +416,7 @@ func (controller *Controller) executeDown(
 			return inspectErr
 		}
 		if err := verifyContainerCore(
-			operation.Target.Name,
+			scope,
 			operation.Previous.Proxy.RuntimeDir,
 			component,
 			resource,
@@ -466,7 +468,7 @@ func (controller *Controller) executeDown(
 		}
 		controller.report("stopped proxy for %s", operation.Target.Name)
 	}
-	plans, err := resolvedTopology(operation.Previous.Spec)
+	plans, err := resolvedTopology(scope, operation.Previous.Spec)
 	if err != nil {
 		return err
 	}
@@ -487,7 +489,7 @@ func (controller *Controller) executeDown(
 			return inspectErr
 		}
 		if err := verifyNetwork(
-			operation.Target.Name,
+			scope,
 			plans[networkKey],
 			resource,
 			actual,
@@ -567,7 +569,8 @@ func (controller *Controller) preflightCommittedDeployment(
 	if deployment.Proxy == nil {
 		return fmt.Errorf("deployment has no proxy record")
 	}
-	plans, err := resolvedTopology(deployment.Spec)
+	scope := controller.dockerScope(deployment.Spec.Name)
+	plans, err := resolvedTopology(scope, deployment.Spec)
 	if err != nil {
 		return err
 	}
@@ -584,7 +587,7 @@ func (controller *Controller) preflightCommittedDeployment(
 			return inspectErr
 		}
 		if err := verifyContainerCore(
-			deployment.Spec.Name,
+			scope,
 			deployment.Proxy.RuntimeDir,
 			component,
 			resource,
@@ -616,7 +619,7 @@ func (controller *Controller) preflightCommittedDeployment(
 			return inspectErr
 		}
 		if err := verifyNetwork(
-			deployment.Spec.Name,
+			scope,
 			plans[key],
 			resource,
 			actual,
@@ -645,7 +648,8 @@ func (controller *Controller) preflightSelectedContainers(
 	if _, err := controller.inspectProxy(ctx, *deployment.Proxy); err != nil {
 		return fmt.Errorf("inspect proxy before restart: %w", err)
 	}
-	plans, err := resolvedTopology(deployment.Spec)
+	scope := controller.dockerScope(deployment.Spec.Name)
+	plans, err := resolvedTopology(scope, deployment.Spec)
 	if err != nil {
 		return err
 	}
@@ -663,7 +667,7 @@ func (controller *Controller) preflightSelectedContainers(
 			return inspectErr
 		}
 		if err := verifyContainerCore(
-			deployment.Spec.Name,
+			scope,
 			deployment.Proxy.RuntimeDir,
 			component,
 			resource,

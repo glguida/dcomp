@@ -12,11 +12,12 @@ import (
 func TestInspectPersistentVolumeReturnsOnlyVerifiedOwnedVolume(t *testing.T) {
 	controller, fake := newControllerHarness(t)
 	preparePersistentVolumeInspection(t, controller, fake, "demo")
-	name := volumeName("demo", "worker", "data")
+	scope := controller.dockerScope("demo")
+	name := volumeName(scope, "worker", "data")
 	fake.volumes[name] = engine.Volume{
 		Name: name, Driver: "local",
 		Mountpoint: "/var/lib/docker/volumes/" + name + "/_data",
-		Labels:     expectedVolumeLabels("demo", "worker", "data"),
+		Labels:     expectedVolumeLabels(scope, "worker", "data"),
 	}
 
 	got, err := controller.InspectPersistentVolume(
@@ -72,7 +73,8 @@ func TestInspectPersistentVolumeRejectsInvalidCoordinatesBeforeDocker(t *testing
 func TestInspectPersistentVolumeRejectsMissingAndForeignVolumes(t *testing.T) {
 	controller, fake := newControllerHarness(t)
 	preparePersistentVolumeInspection(t, controller, fake, "demo")
-	name := volumeName("demo", "worker", "data")
+	scope := controller.dockerScope("demo")
+	name := volumeName(scope, "worker", "data")
 
 	_, err := controller.InspectPersistentVolume(
 		context.Background(), "demo", "worker", "data",
@@ -95,6 +97,12 @@ func TestInspectPersistentVolumeRejectsMissingAndForeignVolumes(t *testing.T) {
 			name: "wrong system",
 			mutate: func(volume *engine.Volume) {
 				volume.Labels[LabelSystem] = "other"
+			},
+		},
+		{
+			name: "wrong state-root namespace",
+			mutate: func(volume *engine.Volume) {
+				volume.Labels[LabelNamespace] = "other"
 			},
 		},
 		{
@@ -137,7 +145,7 @@ func TestInspectPersistentVolumeRejectsMissingAndForeignVolumes(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			volume := engine.Volume{
 				Name: name, Driver: "local",
-				Labels: expectedVolumeLabels("demo", "worker", "data"),
+				Labels: expectedVolumeLabels(scope, "worker", "data"),
 			}
 			test.mutate(&volume)
 			fake.volumes[name] = volume

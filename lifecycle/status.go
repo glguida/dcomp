@@ -203,7 +203,8 @@ func (controller *Controller) observeRetiringResources(
 		return
 	}
 	previous := *operation.Previous
-	plans, err := resolvedTopology(previous.Spec)
+	scope := controller.dockerScope(previous.Spec.Name)
+	plans, err := resolvedTopology(scope, previous.Spec)
 	if err != nil {
 		result.RetiringNetworks = append(result.RetiringNetworks, NetworkStatus{
 			Key: "topology", Problem: err.Error(),
@@ -262,7 +263,7 @@ func (controller *Controller) observeRetiringResources(
 		if inspectErr != nil {
 			status.Problem = inspectErr.Error()
 		} else if err := verifyNetwork(
-			previous.Spec.Name,
+			scope,
 			plans[key],
 			resource,
 			actual,
@@ -341,7 +342,8 @@ func (controller *Controller) observeStatusResources(
 	if process != nil {
 		expectedRuntimeDir = process.RuntimeDir
 	}
-	plans, err := resolvedTopology(spec)
+	scope := controller.dockerScope(spec.Name)
+	plans, err := resolvedTopology(scope, spec)
 	if err != nil {
 		result.Networks = append(result.Networks, NetworkStatus{
 			Key: "topology", Problem: err.Error(),
@@ -363,7 +365,7 @@ func (controller *Controller) observeStatusResources(
 		} else if inspectErr != nil {
 			status.Problem = inspectErr.Error()
 		} else if err := verifyNetwork(
-			spec.Name,
+			scope,
 			plans[key],
 			resource,
 			actual,
@@ -445,7 +447,13 @@ func (controller *Controller) observeComponent(
 		}
 		return left.Protocol < right.Protocol
 	})
-	if err := verifyCurrentContainer(spec.Name, runtimeDir, component, resource, actual); err != nil {
+	if err := verifyCurrentContainer(
+		controller.dockerScope(spec.Name),
+		runtimeDir,
+		component,
+		resource,
+		actual,
+	); err != nil {
 		result.Problem = err.Error()
 		return result
 	}

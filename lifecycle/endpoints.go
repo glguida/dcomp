@@ -99,7 +99,8 @@ func (controller *Controller) recoverAbsentComponentEndpoint(
 	if !component.Runtime.ExternalEgress {
 		return nil
 	}
-	if err := verifyEndpointContainerResource(spec, component, container); err != nil {
+	scope := controller.dockerScope(spec.Name)
+	if err := verifyEndpointContainerResource(scope, component, container); err != nil {
 		return err
 	}
 	_, inspectErr := controller.inspectContainer(ctx, container.ID)
@@ -109,7 +110,7 @@ func (controller *Controller) recoverAbsentComponentEndpoint(
 	if !errors.Is(inspectErr, engine.ErrNotFound) {
 		return inspectErr
 	}
-	plan, network, err := componentEndpointNetwork(spec, networks, component)
+	plan, network, err := componentEndpointNetwork(scope, spec, networks, component)
 	if err != nil {
 		return err
 	}
@@ -120,7 +121,7 @@ func (controller *Controller) recoverAbsentComponentEndpoint(
 	if inspectErr != nil {
 		return inspectErr
 	}
-	if err := verifyNetwork(spec.Name, plan, network, actual); err != nil {
+	if err := verifyNetwork(scope, plan, network, actual); err != nil {
 		return err
 	}
 	endpoint, exists, err := orphanEndpointForContainer(actual, container)
@@ -151,10 +152,11 @@ func (controller *Controller) prepareEndpointCleanup(
 	if !component.Runtime.ExternalEgress {
 		return nil
 	}
-	if err := verifyEndpointContainerResource(spec, component, container); err != nil {
+	scope := controller.dockerScope(spec.Name)
+	if err := verifyEndpointContainerResource(scope, component, container); err != nil {
 		return err
 	}
-	plan, network, err := componentEndpointNetwork(spec, networks, component)
+	plan, network, err := componentEndpointNetwork(scope, spec, networks, component)
 	if err != nil {
 		return err
 	}
@@ -165,7 +167,7 @@ func (controller *Controller) prepareEndpointCleanup(
 	if inspectErr != nil {
 		return inspectErr
 	}
-	if err := verifyNetwork(spec.Name, plan, network, actual); err != nil {
+	if err := verifyNetwork(scope, plan, network, actual); err != nil {
 		return err
 	}
 	endpoint, exists, err := liveEndpointForContainer(actual, container)
@@ -207,6 +209,7 @@ func (controller *Controller) reconcileEndpointCleanup(
 	operation *state.Operation,
 	cleanup state.EndpointCleanup,
 ) error {
+	scope := controller.dockerScope(operation.Target.Name)
 	absent, err := controller.containerAbsent(ctx, state.Resource{
 		ID: cleanup.ContainerID, Name: cleanup.ContainerName,
 	})
@@ -227,7 +230,7 @@ func (controller *Controller) reconcileEndpointCleanup(
 	if inspectErr != nil {
 		return inspectErr
 	}
-	if err := verifyEndpointCleanupNetwork(operation, cleanup, actual); err != nil {
+	if err := verifyEndpointCleanupNetwork(scope, operation, cleanup, actual); err != nil {
 		return err
 	}
 	endpoint, exists, err := pendingEndpoint(actual, cleanup)
@@ -253,7 +256,7 @@ func (controller *Controller) reconcileEndpointCleanup(
 	if inspectErr != nil {
 		return inspectErr
 	}
-	if err := verifyEndpointCleanupNetwork(operation, cleanup, actual); err != nil {
+	if err := verifyEndpointCleanupNetwork(scope, operation, cleanup, actual); err != nil {
 		return err
 	}
 	_, exists, identityErr := pendingEndpoint(actual, cleanup)
@@ -326,11 +329,12 @@ func (controller *Controller) containerAbsent(
 }
 
 func componentEndpointNetwork(
+	scope dockerScope,
 	spec composition.ResolvedSpec,
 	networks map[string]state.Resource,
 	component composition.ResolvedComponent,
 ) (networkPlan, state.Resource, error) {
-	plans, err := resolvedTopology(spec)
+	plans, err := resolvedTopology(scope, spec)
 	if err != nil {
 		return networkPlan{}, state.Resource{}, err
 	}
@@ -353,11 +357,11 @@ func componentEndpointNetwork(
 }
 
 func verifyEndpointContainerResource(
-	spec composition.ResolvedSpec,
+	scope dockerScope,
 	component composition.ResolvedComponent,
 	container state.Resource,
 ) error {
-	expectedName := containerName(spec.Name, component.Name)
+	expectedName := containerName(scope, component.Name)
 	if container.ID == "" || container.Name != expectedName {
 		return fmt.Errorf(
 			"%s has unexpected endpoint cleanup container identity",
@@ -485,6 +489,7 @@ func pendingEndpoint(
 }
 
 func verifyEndpointCleanupNetwork(
+	scope dockerScope,
 	operation *state.Operation,
 	cleanup state.EndpointCleanup,
 	actual engine.Network,
@@ -492,7 +497,7 @@ func verifyEndpointCleanupNetwork(
 	resource := state.Resource{ID: cleanup.NetworkID, Name: cleanup.NetworkName}
 	var verificationErrors []error
 	for _, spec := range cleanupSpecs(operation) {
-		plans, err := resolvedTopology(spec)
+		plans, err := resolvedTopology(scope, spec)
 		if err != nil {
 			return err
 		}
@@ -508,7 +513,7 @@ func verifyEndpointCleanupNetwork(
 		}
 		identityMatches := true
 		for component := range plan.Members {
-			if cleanup.ContainerName != containerName(spec.Name, component) {
+			if cleanup.ContainerName != containerName(scope, component) {
 				identityMatches = false
 				verificationErrors = append(verificationErrors, fmt.Errorf(
 					"endpoint cleanup container name %q does not match %s",
@@ -521,7 +526,7 @@ func verifyEndpointCleanupNetwork(
 		if !identityMatches {
 			continue
 		}
-		if err := verifyNetwork(spec.Name, plan, resource, actual); err == nil {
+		if err := verifyNetwork(scope, plan, resource, actual); err == nil {
 			return nil
 		} else {
 			verificationErrors = append(verificationErrors, err)

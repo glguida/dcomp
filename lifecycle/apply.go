@@ -18,6 +18,7 @@ func (controller *Controller) deploymentMatches(
 	deployment state.Deployment,
 	target composition.ResolvedSpec,
 ) (bool, error) {
+	scope := controller.dockerScope(target.Name)
 	if deployment.Spec.Digest != target.Digest {
 		return false, nil
 	}
@@ -37,7 +38,7 @@ func (controller *Controller) deploymentMatches(
 	} else if inspectErr != nil {
 		return false, inspectErr
 	}
-	plans, err := resolvedTopology(target)
+	plans, err := resolvedTopology(scope, target)
 	if err != nil {
 		return false, err
 	}
@@ -57,7 +58,7 @@ func (controller *Controller) deploymentMatches(
 		if inspectErr != nil {
 			return false, inspectErr
 		}
-		if err := verifyNetwork(target.Name, plans[key], resource, actual); err != nil {
+		if err := verifyNetwork(scope, plans[key], resource, actual); err != nil {
 			return false, err
 		}
 	}
@@ -74,7 +75,7 @@ func (controller *Controller) deploymentMatches(
 			return false, inspectErr
 		}
 		if err := verifyCurrentContainer(
-			target.Name, deployment.Proxy.RuntimeDir, component, resource, actual,
+			scope, deployment.Proxy.RuntimeDir, component, resource, actual,
 		); err != nil {
 			if errors.Is(err, errStandardIOPolicy) {
 				return false, nil
@@ -100,7 +101,7 @@ func (controller *Controller) deploymentMatches(
 		for _, volume := range component.Runtime.Volumes {
 			actualVolume, inspectErr := controller.inspectVolume(
 				ctx,
-				volumeName(target.Name, component.Name, volume.Name),
+				volumeName(scope, component.Name, volume.Name),
 			)
 			if errors.Is(inspectErr, engine.ErrNotFound) {
 				return false, nil
@@ -109,7 +110,7 @@ func (controller *Controller) deploymentMatches(
 				return false, inspectErr
 			}
 			if err := verifyVolume(
-				target.Name,
+				scope,
 				component.Name,
 				volume.Name,
 				actualVolume,
@@ -141,11 +142,12 @@ func (controller *Controller) selectRetainedResources(
 	if operation.Previous == nil {
 		return nil
 	}
-	targetPlans, err := resolvedTopology(operation.Target)
+	scope := controller.dockerScope(operation.Target.Name)
+	targetPlans, err := resolvedTopology(scope, operation.Target)
 	if err != nil {
 		return err
 	}
-	previousPlans, err := resolvedTopology(operation.Previous.Spec)
+	previousPlans, err := resolvedTopology(scope, operation.Previous.Spec)
 	if err != nil {
 		return err
 	}
@@ -186,7 +188,7 @@ func (controller *Controller) selectRetainedResources(
 			return inspectErr
 		}
 		if err := verifyNetwork(
-			operation.Target.Name,
+			scope,
 			targetPlan,
 			resource,
 			actual,
@@ -215,7 +217,7 @@ func (controller *Controller) selectRetainedResources(
 			return inspectErr
 		}
 		if err := verifyCurrentContainer(
-			operation.Target.Name,
+			scope,
 			operation.Previous.Proxy.RuntimeDir,
 			component,
 			resource,
@@ -351,6 +353,7 @@ func (controller *Controller) retireChangedContainers(
 	if operation.Previous == nil {
 		return nil
 	}
+	scope := controller.dockerScope(operation.Target.Name)
 	for _, component := range operation.Previous.Spec.Components {
 		previousResource, exists := operation.Previous.Containers[component.Name]
 		if !exists {
@@ -388,7 +391,7 @@ func (controller *Controller) retireChangedContainers(
 			return inspectErr
 		}
 		if err := verifyContainerCore(
-			operation.Target.Name,
+			scope,
 			operation.Previous.Proxy.RuntimeDir,
 			component,
 			previousResource,
@@ -463,13 +466,14 @@ func (controller *Controller) preflightApply(
 	ctx context.Context,
 	operation *state.Operation,
 ) error {
-	targetPlans, err := resolvedTopology(operation.Target)
+	scope := controller.dockerScope(operation.Target.Name)
+	targetPlans, err := resolvedTopology(scope, operation.Target)
 	if err != nil {
 		return err
 	}
 	var previousPlans map[string]networkPlan
 	if operation.Previous != nil {
-		previousPlans, err = resolvedTopology(operation.Previous.Spec)
+		previousPlans, err = resolvedTopology(scope, operation.Previous.Spec)
 		if err != nil {
 			return err
 		}
@@ -486,7 +490,7 @@ func (controller *Controller) preflightApply(
 				return inspectErr
 			}
 			if err := verifyContainerCore(
-				operation.Target.Name,
+				scope,
 				operation.Previous.Proxy.RuntimeDir,
 				component,
 				resource,
@@ -525,7 +529,7 @@ func (controller *Controller) preflightApply(
 				return inspectErr
 			}
 			if err := verifyNetwork(
-				operation.Target.Name,
+				scope,
 				previousPlans[key],
 				resource,
 				actual,
@@ -545,7 +549,7 @@ func (controller *Controller) preflightApply(
 	for _, component := range operation.Target.Components {
 		actual, inspectErr := controller.inspectContainer(
 			ctx,
-			containerName(operation.Target.Name, component.Name),
+			containerName(scope, component.Name),
 		)
 		if inspectErr == nil {
 			if !controller.allowedContainerAtTargetName(operation, component.Name, actual.ID) {
@@ -560,7 +564,7 @@ func (controller *Controller) preflightApply(
 		for _, volume := range component.Runtime.Volumes {
 			actualVolume, inspectErr := controller.inspectVolume(
 				ctx,
-				volumeName(operation.Target.Name, component.Name, volume.Name),
+				volumeName(scope, component.Name, volume.Name),
 			)
 			if errors.Is(inspectErr, engine.ErrNotFound) {
 				continue
@@ -569,7 +573,7 @@ func (controller *Controller) preflightApply(
 				return inspectErr
 			}
 			if err := verifyVolume(
-				operation.Target.Name,
+				scope,
 				component.Name,
 				volume.Name,
 				actualVolume,
@@ -641,7 +645,8 @@ func (controller *Controller) ensureTargetNetworks(
 	ctx context.Context,
 	operation *state.Operation,
 ) error {
-	plans, err := resolvedTopology(operation.Target)
+	scope := controller.dockerScope(operation.Target.Name)
+	plans, err := resolvedTopology(scope, operation.Target)
 	if err != nil {
 		return err
 	}
@@ -668,8 +673,9 @@ func (controller *Controller) removeConflictingPreviousNetwork(
 	if operation.Previous == nil {
 		return nil
 	}
+	scope := controller.dockerScope(operation.Target.Name)
 	target, targetExists := operation.Networks[plan.Key]
-	previousPlans, err := resolvedTopology(operation.Previous.Spec)
+	previousPlans, err := resolvedTopology(scope, operation.Previous.Spec)
 	if err != nil {
 		return err
 	}
@@ -690,7 +696,7 @@ func (controller *Controller) removeConflictingPreviousNetwork(
 			return inspectErr
 		}
 		if err := verifyNetwork(
-			operation.Target.Name,
+			scope,
 			previousPlan,
 			resource,
 			actual,
@@ -718,11 +724,12 @@ func (controller *Controller) ensureNetwork(
 	operation *state.Operation,
 	plan networkPlan,
 ) error {
+	scope := controller.dockerScope(operation.Target.Name)
 	pendingKey := networkCreateKey(plan.Key)
 	if resource, exists := operation.Networks[plan.Key]; exists {
 		actual, err := controller.inspectNetwork(ctx, resource.ID)
 		if err == nil {
-			if err := verifyNetwork(operation.Target.Name, plan, resource, actual); err != nil {
+			if err := verifyNetwork(scope, plan, resource, actual); err != nil {
 				return err
 			}
 			return controller.clearPendingCreate(operation, pendingKey)
@@ -742,7 +749,7 @@ func (controller *Controller) ensureNetwork(
 		}
 		resource := state.Resource{ID: actual.ID, Name: actual.Name}
 		if err := verifyNetwork(
-			operation.Target.Name,
+			scope,
 			plan,
 			resource,
 			actual,
@@ -764,7 +771,7 @@ func (controller *Controller) ensureNetwork(
 			Name:     plan.Name,
 			Internal: plan.Internal,
 			Labels: expectedNetworkLabels(
-				operation.Target.Name,
+				scope,
 				plan,
 				operation.ID,
 			),
@@ -780,7 +787,7 @@ func (controller *Controller) ensureNetwork(
 	}
 	resource := state.Resource{ID: actual.ID, Name: actual.Name}
 	if err := verifyNetwork(
-		operation.Target.Name,
+		scope,
 		plan,
 		resource,
 		actual,
@@ -798,7 +805,8 @@ func (controller *Controller) ensureTargetContainers(
 	ctx context.Context,
 	operation *state.Operation,
 ) error {
-	plans, err := resolvedTopology(operation.Target)
+	scope := controller.dockerScope(operation.Target.Name)
+	plans, err := resolvedTopology(scope, operation.Target)
 	if err != nil {
 		return err
 	}
@@ -829,13 +837,14 @@ func (controller *Controller) ensureContainer(
 	if operation.Proxy == nil {
 		return fmt.Errorf("cannot create %s before the proxy is ready", component.Name)
 	}
+	scope := controller.dockerScope(operation.Target.Name)
 	runtimeDir := operation.Proxy.RuntimeDir
 	pendingKey := containerCreateKey(component.Name)
 	if resource, exists := operation.Containers[component.Name]; exists {
 		actual, err := controller.inspectContainer(ctx, resource.ID)
 		if err == nil {
 			if err := verifyCurrentContainer(
-				operation.Target.Name,
+				scope,
 				runtimeDir,
 				component,
 				resource,
@@ -857,14 +866,14 @@ func (controller *Controller) ensureContainer(
 		}
 	}
 
-	name := containerName(operation.Target.Name, component.Name)
+	name := containerName(scope, component.Name)
 	if actual, err := controller.inspectContainer(ctx, name); err == nil {
 		if actual.Labels[LabelOperation] != operation.ID {
 			return fmt.Errorf("container name %q is occupied", name)
 		}
 		resource := state.Resource{ID: actual.ID, Name: actual.Name}
 		if err := verifyCurrentContainer(
-			operation.Target.Name,
+			scope,
 			runtimeDir,
 			component,
 			resource,
@@ -906,13 +915,13 @@ func (controller *Controller) ensureContainer(
 			NetworkID:      networkID,
 			NetworkAliases: networkAliases,
 			Labels: expectedContainerLabels(
-				operation.Target.Name,
+				scope,
 				component,
 				operation.ID,
 			),
 			Environment: environment,
 			Mounts: componentMounts(
-				operation.Target.Name, runtimeDir, component,
+				scope, runtimeDir, component,
 			),
 			Args:         append([]string(nil), component.Runtime.Args...),
 			PortBindings: componentPorts(component),
@@ -930,7 +939,7 @@ func (controller *Controller) ensureContainer(
 	}
 	resource := state.Resource{ID: actual.ID, Name: actual.Name}
 	if err := verifyCurrentContainer(
-		operation.Target.Name,
+		scope,
 		runtimeDir,
 		component,
 		resource,
@@ -984,7 +993,8 @@ func (controller *Controller) resolvePendingCreates(
 		}
 		return nil
 	}
-	plans, err := resolvedTopology(operation.Target)
+	scope := controller.dockerScope(operation.Target.Name)
+	plans, err := resolvedTopology(scope, operation.Target)
 	if err != nil {
 		return err
 	}
@@ -1105,7 +1115,8 @@ func (controller *Controller) reconcileAttachments(
 	ctx context.Context,
 	operation *state.Operation,
 ) error {
-	plans, err := resolvedTopology(operation.Target)
+	scope := controller.dockerScope(operation.Target.Name)
+	plans, err := resolvedTopology(scope, operation.Target)
 	if err != nil {
 		return err
 	}
@@ -1130,7 +1141,7 @@ func (controller *Controller) reconcileAttachments(
 			return inspectErr
 		}
 		if err := verifyCurrentContainer(
-			operation.Target.Name,
+			scope,
 			operation.Proxy.RuntimeDir,
 			component,
 			resource,
@@ -1293,7 +1304,8 @@ func (controller *Controller) removeObsoleteNetworks(
 	if operation.Previous == nil {
 		return nil
 	}
-	previousPlans, err := resolvedTopology(operation.Previous.Spec)
+	scope := controller.dockerScope(operation.Target.Name)
+	previousPlans, err := resolvedTopology(scope, operation.Previous.Spec)
 	if err != nil {
 		return err
 	}
@@ -1317,7 +1329,7 @@ func (controller *Controller) removeObsoleteNetworks(
 			return inspectErr
 		}
 		if err := verifyNetwork(
-			operation.Target.Name,
+			scope,
 			previousPlans[key],
 			resource,
 			actual,
@@ -1348,7 +1360,8 @@ func (controller *Controller) startNewContainers(
 	if _, err := controller.inspectProxy(ctx, *operation.Proxy); err != nil {
 		return fmt.Errorf("inspect proxy before starting components: %w", err)
 	}
-	plans, err := resolvedTopology(operation.Target)
+	scope := controller.dockerScope(operation.Target.Name)
+	plans, err := resolvedTopology(scope, operation.Target)
 	if err != nil {
 		return err
 	}
@@ -1371,7 +1384,7 @@ func (controller *Controller) startNewContainers(
 			return inspectErr
 		}
 		if err := verifyCurrentContainer(
-			operation.Target.Name,
+			scope,
 			operation.Proxy.RuntimeDir,
 			component,
 			resource,

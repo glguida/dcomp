@@ -101,7 +101,7 @@ func run(arguments []string) int {
 	proxyRoot := *runtimeRoot
 	if proxyRoot == "" {
 		var err error
-		proxyRoot, err = proxy.DefaultRuntimeRoot()
+		proxyRoot, err = proxy.DefaultRuntimeRoot(root)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			return 1

@@ -1,13 +1,15 @@
 package lifecycle
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/glguida/dcomp/composition"
 )
 
 func TestResolvedTopologyOnlyCreatesEgressNetworks(t *testing.T) {
-	plans, err := resolvedTopology(composition.ResolvedSpec{
+	scope := newDockerScope("/var/lib/dcomp/one", "demo")
+	plans, err := resolvedTopology(scope, composition.ResolvedSpec{
 		Name: "demo",
 		Components: []composition.ResolvedComponent{
 			{Name: "isolated"},
@@ -36,6 +38,7 @@ func TestResolvedTopologyOnlyCreatesEgressNetworks(t *testing.T) {
 }
 
 func TestDockerResourceNamesPreserveTupleBoundaries(t *testing.T) {
+	root := "/var/lib/dcomp/one"
 	tests := []struct {
 		name  string
 		left  string
@@ -43,13 +46,13 @@ func TestDockerResourceNamesPreserveTupleBoundaries(t *testing.T) {
 	}{
 		{
 			name:  "system and component",
-			left:  containerName("a-b", "c"),
-			right: containerName("a", "b-c"),
+			left:  containerName(newDockerScope(root, "a-b"), "c"),
+			right: containerName(newDockerScope(root, "a"), "b-c"),
 		},
 		{
 			name:  "component and volume",
-			left:  volumeName("demo", "a-b", "c"),
-			right: volumeName("demo", "a", "b-c"),
+			left:  volumeName(newDockerScope(root, "demo"), "a-b", "c"),
+			right: volumeName(newDockerScope(root, "demo"), "a", "b-c"),
 		},
 	}
 	for _, test := range tests {
@@ -58,5 +61,41 @@ func TestDockerResourceNamesPreserveTupleBoundaries(t *testing.T) {
 				t.Fatalf("distinct resource tuples both map to %q", test.left)
 			}
 		})
+	}
+}
+
+func TestDockerScopeIsStablePerCleanStateRootAndDistinctAcrossRoots(t *testing.T) {
+	first := newDockerScope("/var/lib/dcomp/one/../one", "demo")
+	alias := newDockerScope("/var/lib/dcomp/one", "demo")
+	second := newDockerScope("/var/lib/dcomp/two", "demo")
+
+	if first != alias {
+		t.Fatalf("clean aliases produced different scopes: %#v and %#v", first, alias)
+	}
+	if first.Namespace == second.Namespace {
+		t.Fatalf("different state roots share namespace %q", first.Namespace)
+	}
+	if got := len(first.Namespace); got != dockerNamespaceSize*2 {
+		t.Fatalf("namespace length = %d, want %d", got, dockerNamespaceSize*2)
+	}
+	if containerName(first, "worker") == containerName(second, "worker") {
+		t.Fatal("different state roots produced the same container name")
+	}
+}
+
+func TestDockerResourceNamesFitMaximumDescriptionNames(t *testing.T) {
+	maximum := "a" + strings.Repeat("b", 62)
+	scope := newDockerScope("/var/lib/dcomp/maximum", maximum)
+	for kind, name := range map[string]string{
+		"container": containerName(scope, maximum),
+		"network":   componentNetworkName(scope, maximum),
+		"volume":    volumeName(scope, maximum, maximum),
+	} {
+		if len(name) > 255 {
+			t.Fatalf("maximum %s name has %d bytes: %q", kind, len(name), name)
+		}
+		if !strings.HasPrefix(name, "dcomp."+scope.Namespace+"."+maximum+".") {
+			t.Fatalf("%s name is outside its Docker namespace: %q", kind, name)
+		}
 	}
 }

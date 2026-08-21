@@ -70,8 +70,8 @@ func (controller *Controller) validate() error {
 	if controller.Proxy == nil {
 		return fmt.Errorf("DComp proxy manager is not configured")
 	}
-	if controller.State.Root == "" {
-		return fmt.Errorf("state root is not configured")
+	if !filepath.IsAbs(controller.State.Root) {
+		return fmt.Errorf("state root is not an absolute path")
 	}
 	if !filepath.IsAbs(controller.RuntimeRoot) ||
 		filepath.Clean(controller.RuntimeRoot) != controller.RuntimeRoot {

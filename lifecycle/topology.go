@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"sort"
 
 	"github.com/glguida/dcomp/composition"
@@ -13,6 +14,7 @@ import (
 
 const (
 	LabelOwner          = "io.dcomp.owner"
+	LabelNamespace      = "io.dcomp.namespace"
 	LabelSystem         = "io.dcomp.system"
 	LabelComponent      = "io.dcomp.component"
 	LabelKind           = "io.dcomp.kind"
@@ -24,7 +26,28 @@ const (
 	LabelVolumeLogical  = "io.dcomp.volume-logical"
 	ownerValue          = "dcomp"
 	componentNetworkTag = "component"
+	dockerNamespaceSize = 16
 )
+
+// dockerScope is the complete identity of one lifecycle namespace on one
+// Docker engine. The namespace is derived from the cleaned state-root path;
+// the human-readable system name remains a separate ownership coordinate.
+type dockerScope struct {
+	Namespace string
+	System    string
+}
+
+func newDockerScope(stateRoot, system string) dockerScope {
+	sum := sha256.Sum256([]byte(filepath.Clean(stateRoot)))
+	return dockerScope{
+		Namespace: hex.EncodeToString(sum[:dockerNamespaceSize]),
+		System:    system,
+	}
+}
+
+func (controller *Controller) dockerScope(system string) dockerScope {
+	return newDockerScope(controller.State.Root, system)
+}
 
 type networkPlan struct {
 	Key      string
@@ -34,7 +57,17 @@ type networkPlan struct {
 	Digest   string
 }
 
-func resolvedTopology(spec composition.ResolvedSpec) (map[string]networkPlan, error) {
+func resolvedTopology(
+	scope dockerScope,
+	spec composition.ResolvedSpec,
+) (map[string]networkPlan, error) {
+	if scope.System != spec.Name {
+		return nil, fmt.Errorf(
+			"Docker scope belongs to system %q, not %q",
+			scope.System,
+			spec.Name,
+		)
+	}
 	plans := make(map[string]networkPlan, len(spec.Components))
 	for _, component := range spec.Components {
 		if !component.Runtime.ExternalEgress {
@@ -43,7 +76,7 @@ func resolvedTopology(spec composition.ResolvedSpec) (map[string]networkPlan, er
 		key := componentNetworkKey(component.Name)
 		plan := networkPlan{
 			Key:      key,
-			Name:     componentNetworkName(spec.Name, component.Name),
+			Name:     componentNetworkName(scope, component.Name),
 			Internal: false,
 			Members: map[string]struct{}{
 				component.Name: {},
@@ -118,14 +151,17 @@ func componentNetworkKey(component string) string {
 	return componentNetworkTag + "/" + component
 }
 
-func componentNetworkName(system, component string) string {
-	return "dcomp." + system + ".component." + component
+func componentNetworkName(scope dockerScope, component string) string {
+	return "dcomp." + scope.Namespace + "." + scope.System +
+		".component." + component
 }
 
-func containerName(system, component string) string {
-	return "dcomp." + system + ".container." + component
+func containerName(scope dockerScope, component string) string {
+	return "dcomp." + scope.Namespace + "." + scope.System +
+		".container." + component
 }
 
-func volumeName(system, component, logical string) string {
-	return "dcomp." + system + ".volume." + component + "." + logical
+func volumeName(scope dockerScope, component, logical string) string {
+	return "dcomp." + scope.Namespace + "." + scope.System +
+		".volume." + component + "." + logical
 }

@@ -55,14 +55,15 @@ func (controller *Controller) InspectPersistentVolume(
 		return PersistentVolume{}, err
 	}
 
-	name := volumeName(system, component, logical)
+	scope := controller.dockerScope(system)
+	name := volumeName(scope, component, logical)
 	volume, err := controller.inspectVolume(ctx, name)
 	if err != nil {
 		return PersistentVolume{}, fmt.Errorf(
 			"inspect persistent volume %q: %w", name, err,
 		)
 	}
-	if err := verifyVolume(system, component, logical, volume); err != nil {
+	if err := verifyVolume(scope, component, logical, volume); err != nil {
 		return PersistentVolume{}, err
 	}
 	return PersistentVolume{

@@ -42,6 +42,93 @@ func TestEngineBindingRejectsObservationAndMutationOnAnotherDaemon(t *testing.T)
 	requireDesired(t, controller.State, spec.Name)
 }
 
+func TestDifferentStateRootsIsolateSameNamedDockerResources(t *testing.T) {
+	fake := newFakeEngine()
+	installImages(fake, "worker:v1", "sha256:worker")
+	first := controllerForEngine(t, fake)
+	second := controllerForEngine(t, fake)
+	spec := volumeSpec("worker:v1")
+	spec.Components[0].Runtime.ExternalEgress = true
+
+	if err := first.Up(context.Background(), spec); err != nil {
+		t.Fatalf("first state root: %v", err)
+	}
+	if err := second.Up(context.Background(), spec); err != nil {
+		t.Fatalf("second state root: %v", err)
+	}
+
+	firstDeployment := requireDesired(t, first.State, spec.Name)
+	secondDeployment := requireDesired(t, second.State, spec.Name)
+	firstScope := first.dockerScope(spec.Name)
+	secondScope := second.dockerScope(spec.Name)
+	if firstScope.Namespace == secondScope.Namespace {
+		t.Fatalf("different roots share namespace %q", firstScope.Namespace)
+	}
+	firstContainer := firstDeployment.Containers["worker"]
+	secondContainer := secondDeployment.Containers["worker"]
+	if firstContainer.Name == secondContainer.Name {
+		t.Fatalf("containers share physical name %q", firstContainer.Name)
+	}
+	firstNetwork := firstDeployment.Networks[componentNetworkKey("worker")]
+	secondNetwork := secondDeployment.Networks[componentNetworkKey("worker")]
+	if firstNetwork.Name == secondNetwork.Name {
+		t.Fatalf("networks share physical name %q", firstNetwork.Name)
+	}
+	firstVolume := volumeName(firstScope, "worker", "data")
+	secondVolume := volumeName(secondScope, "worker", "data")
+	if firstVolume == secondVolume {
+		t.Fatalf("volumes share physical name %q", firstVolume)
+	}
+	for namespace, labels := range map[string]map[string]string{
+		firstScope.Namespace:  fake.containers[firstContainer.ID].Labels,
+		secondScope.Namespace: fake.containers[secondContainer.ID].Labels,
+	} {
+		if labels[LabelNamespace] != namespace {
+			t.Fatalf("container namespace labels = %#v, want %q", labels, namespace)
+		}
+	}
+	for _, resource := range []struct {
+		namespace string
+		labels    map[string]string
+	}{
+		{firstScope.Namespace, fake.networks[firstNetwork.ID].Labels},
+		{secondScope.Namespace, fake.networks[secondNetwork.ID].Labels},
+		{firstScope.Namespace, fake.volumes[firstVolume].Labels},
+		{secondScope.Namespace, fake.volumes[secondVolume].Labels},
+	} {
+		if resource.labels[LabelNamespace] != resource.namespace {
+			t.Fatalf(
+				"resource namespace labels = %#v, want %q",
+				resource.labels,
+				resource.namespace,
+			)
+		}
+	}
+	if _, exists := fake.volumes[firstVolume]; !exists {
+		t.Fatalf("first namespaced volume %q is absent", firstVolume)
+	}
+	if _, exists := fake.volumes[secondVolume]; !exists {
+		t.Fatalf("second namespaced volume %q is absent", secondVolume)
+	}
+
+	if err := first.Down(context.Background(), spec.Name); err != nil {
+		t.Fatalf("down first state root: %v", err)
+	}
+	status, err := second.Status(context.Background(), spec.Name)
+	if err != nil {
+		t.Fatalf("observe second state root after first down: %v", err)
+	}
+	if !status.Operational() {
+		t.Fatalf("first down disturbed second state root: %#v", status)
+	}
+	if _, exists := fake.containers[secondContainer.ID]; !exists {
+		t.Fatal("first down removed the second root's container")
+	}
+	if _, exists := fake.networks[secondNetwork.ID]; !exists {
+		t.Fatal("first down removed the second root's network")
+	}
+}
+
 func TestStatusWaitsForLifecycleGenerationLock(t *testing.T) {
 	controller, fake := newControllerHarness(t)
 	installImages(
@@ -236,9 +323,9 @@ func TestAbortRefusesPendingNetworkCreateWithoutChangingOperation(t *testing.T) 
 	base := newFakeEngine()
 	fake := &failFirstNetworkCreate{
 		fakeEngine: base,
-		name:       "dcomp.demo.component.consumer",
 	}
 	controller := controllerForEngine(t, fake)
+	fake.name = componentNetworkName(controller.dockerScope("demo"), "consumer")
 	installImages(
 		base,
 		"provider:v1", "consumer:v1",
@@ -289,9 +376,9 @@ func TestDifferentUpResolvesPendingCreateThenSupersedes(t *testing.T) {
 	base := newFakeEngine()
 	fake := &failFirstNetworkCreate{
 		fakeEngine: base,
-		name:       "dcomp.demo.component.consumer",
 	}
 	controller := controllerForEngine(t, fake)
+	fake.name = componentNetworkName(controller.dockerScope("demo"), "consumer")
 	installImages(
 		base,
 		"provider:v1", "consumer:v1", "consumer:v2",
@@ -323,9 +410,9 @@ func TestDifferentUpDoesNotResolvePendingContainerAgainstDeadProxy(t *testing.T)
 	base := newFakeEngine()
 	fake := &failFirstContainerCreate{
 		fakeEngine: base,
-		name:       "dcomp.demo.container.provider",
 	}
 	controller := controllerForEngine(t, fake)
+	fake.name = containerName(controller.dockerScope("demo"), "provider")
 	installImages(
 		base,
 		"provider:v1", "consumer:v1", "consumer:v2",
@@ -369,9 +456,9 @@ func TestAbortRefusesPendingContainerCreateWithoutChangingOperation(t *testing.T
 	base := newFakeEngine()
 	fake := &failFirstContainerCreate{
 		fakeEngine: base,
-		name:       "dcomp.demo.container.provider",
 	}
 	controller := controllerForEngine(t, fake)
+	fake.name = containerName(controller.dockerScope("demo"), "provider")
 	installImages(
 		base,
 		"provider:v1", "consumer:v1",

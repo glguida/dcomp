@@ -1,7 +1,10 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -52,6 +55,10 @@ func TestPSRejectsMoreThanOneSystemName(t *testing.T) {
 }
 
 func TestVolumeJSONInspectsExactOwnedVolume(t *testing.T) {
+	root := t.TempDir()
+	digest := sha256.Sum256([]byte(filepath.Clean(root)))
+	namespace := hex.EncodeToString(digest[:16])
+	physicalName := "dcomp." + namespace + ".demo.volume.worker.state"
 	socket := filepath.Join(t.TempDir(), "docker.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
@@ -69,12 +76,13 @@ func TestVolumeJSONInspectsExactOwnedVolume(t *testing.T) {
 				_ = json.NewEncoder(writer).Encode(map[string]string{
 					"ID": "test-engine",
 				})
-			case "/v1.47/volumes/dcomp.demo.volume.worker.state":
+			case "/v1.47/volumes/" + physicalName:
 				_ = json.NewEncoder(writer).Encode(map[string]interface{}{
-					"Name":   "dcomp.demo.volume.worker.state",
+					"Name":   physicalName,
 					"Driver": "local",
 					"Labels": map[string]string{
 						"io.dcomp.owner":          "dcomp",
+						"io.dcomp.namespace":      namespace,
 						"io.dcomp.system":         "demo",
 						"io.dcomp.kind":           "volume",
 						"io.dcomp.component":      "worker",
@@ -90,7 +98,6 @@ func TestVolumeJSONInspectsExactOwnedVolume(t *testing.T) {
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(func() { _ = server.Close() })
 
-	root := t.TempDir()
 	store := state.Store{Root: root}
 	if err := store.BindEngine("test-engine"); err != nil {
 		t.Fatal(err)
@@ -111,9 +118,9 @@ func TestVolumeJSONInspectsExactOwnedVolume(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("volume exit code = %d, want 0", code)
 	}
-	const want = "{\"api_version\":2,\"system\":\"demo\"," +
-		"\"component\":\"worker\",\"logical_name\":\"state\"," +
-		"\"name\":\"dcomp.demo.volume.worker.state\"}\n"
+	want := fmt.Sprintf("{\"api_version\":2,\"system\":\"demo\","+
+		"\"component\":\"worker\",\"logical_name\":\"state\","+
+		"\"name\":%q}\n", physicalName)
 	if output != want {
 		t.Fatalf("volume output = %q, want %q", output, want)
 	}
@@ -124,7 +131,7 @@ func TestVolumeJSONInspectsExactOwnedVolume(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("plain volume exit code = %d, want 0", code)
 	}
-	if want := "dcomp.demo.volume.worker.state\n"; output != want {
+	if want := physicalName + "\n"; output != want {
 		t.Fatalf("plain volume output = %q, want %q", output, want)
 	}
 }

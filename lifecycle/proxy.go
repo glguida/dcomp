@@ -121,11 +121,12 @@ func (controller *Controller) removeContainersWithStaleProxyMounts(
 	ctx context.Context,
 	operation *state.Operation,
 ) error {
+	scope := controller.dockerScope(operation.Target.Name)
 	candidates := cloneResources(operation.Containers)
 	for _, component := range operation.Target.Components {
 		actual, inspectErr := controller.inspectContainer(
 			ctx,
-			containerName(operation.Target.Name, component.Name),
+			containerName(scope, component.Name),
 		)
 		if errors.Is(inspectErr, engine.ErrNotFound) {
 			continue
@@ -184,7 +185,7 @@ func (controller *Controller) removeContainersWithStaleProxyMounts(
 			)
 		}
 		if err := verifyCurrentContainer(
-			operation.Target.Name,
+			scope,
 			runtimeDirectory(operation.RuntimeRoot, operation.Target.Name),
 			component,
 			resource,

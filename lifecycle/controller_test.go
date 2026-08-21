@@ -49,6 +49,7 @@ func TestUpUsesNoneWithoutEgressAndPassesRuntimeResources(t *testing.T) {
 	if err := controller.Up(context.Background(), spec); err != nil {
 		t.Fatal(err)
 	}
+	physicalVolume := volumeName(controller.dockerScope(spec.Name), "consumer", "data")
 
 	deployment := requireDesired(t, controller.State, spec.Name)
 	requireNoOperation(t, controller.State, spec.Name)
@@ -88,7 +89,7 @@ func TestUpUsesNoneWithoutEgressAndPassesRuntimeResources(t *testing.T) {
 			ReadOnly: true,
 		},
 		{
-			Type: engine.MountVolume, Source: "dcomp.demo.volume.consumer.data",
+			Type: engine.MountVolume, Source: physicalVolume,
 			Target: "/var/lib/consumer",
 		},
 		{
@@ -119,7 +120,7 @@ func TestUpUsesNoneWithoutEgressAndPassesRuntimeResources(t *testing.T) {
 	if !reflect.DeepEqual(consumer.PortBindings, wantPorts) {
 		t.Fatalf("consumer ports = %#v, want %#v", consumer.PortBindings, wantPorts)
 	}
-	volume, exists := fake.volumes["dcomp.demo.volume.consumer.data"]
+	volume, exists := fake.volumes[physicalVolume]
 	if !exists {
 		t.Fatal("declared persistent volume was not created")
 	}
@@ -418,7 +419,7 @@ func TestPersistentVolumeSurvivesReplacementAndDown(t *testing.T) {
 	}
 	first := requireDesired(t, controller.State, v1.Name)
 	firstID := first.Containers["worker"].ID
-	volume := "dcomp.storage.volume.worker.data"
+	volume := volumeName(controller.dockerScope(v1.Name), "worker", "data")
 	firstVolume := fake.volumes[volume]
 	if firstVolume.Name == "" {
 		t.Fatal("persistent volume was not created")
@@ -805,7 +806,9 @@ func TestLostCreateResponseIsRecoveredWithoutDuplicateResources(t *testing.T) {
 	)
 	spec := linkedSpec("provider:v1", "consumer:v1")
 	spec.Components[1].Runtime.ExternalEgress = true
-	fake.createNetworkErrors["dcomp.demo.component.consumer"] =
+	fake.createNetworkErrors[componentNetworkName(
+		controller.dockerScope(spec.Name), "consumer",
+	)] =
 		[]error{errors.New("lost create response")}
 
 	if err := controller.Up(context.Background(), spec); err != nil {

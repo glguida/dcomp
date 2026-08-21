@@ -19,14 +19,17 @@ import (
 
 const ConfigVersion = 1
 
-func DefaultRuntimeRoot() (string, error) {
+func DefaultRuntimeRoot(stateRoot string) (string, error) {
 	if root := os.Getenv("DCOMP_RUNTIME_ROOT"); root != "" {
 		if !filepath.IsAbs(root) || filepath.Clean(root) != root {
 			return "", fmt.Errorf("DCOMP_RUNTIME_ROOT must be an absolute clean path")
 		}
 		return root, nil
 	}
-	return "/var/run/dcomp", nil
+	if !filepath.IsAbs(stateRoot) {
+		return "", fmt.Errorf("state root must be an absolute path")
+	}
+	return filepath.Join(stateRoot, "run"), nil
 }
 
 const (

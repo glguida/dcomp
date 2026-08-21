@@ -64,6 +64,7 @@ func (controller *Controller) Logs(
 	if err != nil {
 		return err
 	}
+	scope := controller.dockerScope(spec.Name)
 	if err := controller.verifyEngineBinding(ctx); err != nil {
 		return err
 	}
@@ -93,14 +94,14 @@ func (controller *Controller) Logs(
 		// Logs remain available while diagnosing a component created by an older
 		// DComp runtime policy. Identity, ownership, security, environment, and
 		// networks are still verified below; only attach requires current stdio.
-		if err := verifyContainerCore(spec.Name, runtimeDir, component, resource, container); err != nil {
+		if err := verifyContainerCore(scope, runtimeDir, component, resource, container); err != nil {
 			return err
 		}
 		if err := verifyContainerEnvironment(spec, component, container); err != nil {
 			return err
 		}
 		if committed {
-			plans, topologyErr := resolvedTopology(spec)
+			plans, topologyErr := resolvedTopology(scope, spec)
 			if topologyErr != nil {
 				return topologyErr
 			}

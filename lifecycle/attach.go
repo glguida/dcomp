@@ -89,7 +89,8 @@ func (controller *Controller) Attach(
 	}
 	defer attachmentLock.Close()
 
-	plans, err := resolvedTopology(deployment.Spec)
+	scope := controller.dockerScope(deployment.Spec.Name)
+	plans, err := resolvedTopology(scope, deployment.Spec)
 	if err != nil {
 		return err
 	}
@@ -98,7 +99,7 @@ func (controller *Controller) Attach(
 		return fmt.Errorf("inspect %s before standard I/O attachment: %w", componentName, err)
 	}
 	if err := verifyCurrentContainer(
-		deployment.Spec.Name,
+		scope,
 		deployment.Proxy.RuntimeDir,
 		component,
 		resource,

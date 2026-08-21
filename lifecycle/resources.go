@@ -27,13 +27,14 @@ func componentSecurity() engine.ContainerSecurity {
 }
 
 func expectedNetworkLabels(
-	system string,
+	scope dockerScope,
 	plan networkPlan,
 	operation string,
 ) map[string]string {
 	labels := map[string]string{
 		LabelOwner:       ownerValue,
-		LabelSystem:      system,
+		LabelNamespace:   scope.Namespace,
+		LabelSystem:      scope.System,
 		LabelKind:        "network",
 		LabelNetworkKey:  plan.Key,
 		LabelNetworkSpec: plan.Digest,
@@ -45,13 +46,14 @@ func expectedNetworkLabels(
 }
 
 func expectedContainerLabels(
-	system string,
+	scope dockerScope,
 	component composition.ResolvedComponent,
 	operation string,
 ) map[string]string {
 	labels := map[string]string{
 		LabelOwner:         ownerValue,
-		LabelSystem:        system,
+		LabelNamespace:     scope.Namespace,
+		LabelSystem:        scope.System,
 		LabelKind:          "component",
 		LabelComponent:     component.Name,
 		LabelComponentSpec: component.Digest,
@@ -63,13 +65,14 @@ func expectedContainerLabels(
 }
 
 func expectedVolumeLabels(
-	system string,
+	scope dockerScope,
 	component string,
 	logical string,
 ) map[string]string {
 	return map[string]string{
 		LabelOwner:         ownerValue,
-		LabelSystem:        system,
+		LabelNamespace:     scope.Namespace,
+		LabelSystem:        scope.System,
 		LabelKind:          "volume",
 		LabelComponent:     component,
 		LabelVolume:        "1",
@@ -78,7 +81,7 @@ func expectedVolumeLabels(
 }
 
 func verifyNetwork(
-	system string,
+	scope dockerScope,
 	plan networkPlan,
 	resource state.Resource,
 	actual engine.Network,
@@ -105,7 +108,7 @@ func verifyNetwork(
 			actual.Internal,
 		)
 	}
-	expected := expectedNetworkLabels(system, plan, "")
+	expected := expectedNetworkLabels(scope, plan, "")
 	for key, value := range expected {
 		if actual.Labels[key] != value {
 			return fmt.Errorf(
@@ -119,19 +122,19 @@ func verifyNetwork(
 }
 
 func verifyVolume(
-	system string,
+	scope dockerScope,
 	component string,
 	logical string,
 	actual engine.Volume,
 ) error {
-	expectedName := volumeName(system, component, logical)
+	expectedName := volumeName(scope, component, logical)
 	if actual.Name != expectedName || actual.Driver != "local" {
 		return fmt.Errorf(
 			"volume %q is not the expected local volume",
 			expectedName,
 		)
 	}
-	for key, value := range expectedVolumeLabels(system, component, logical) {
+	for key, value := range expectedVolumeLabels(scope, component, logical) {
 		if actual.Labels[key] != value {
 			return fmt.Errorf(
 				"volume %q is not owned by %s.%s",
@@ -145,7 +148,7 @@ func verifyVolume(
 }
 
 func verifyContainerCore(
-	system string,
+	scope dockerScope,
 	runtimeDir string,
 	component composition.ResolvedComponent,
 	resource state.Resource,
@@ -160,7 +163,7 @@ func verifyContainerCore(
 		)
 	}
 	if actual.Name != resource.Name ||
-		actual.Name != containerName(system, component.Name) {
+		actual.Name != containerName(scope, component.Name) {
 		return fmt.Errorf(
 			"container %s has unexpected name %q",
 			actual.ID,
@@ -175,7 +178,7 @@ func verifyContainerCore(
 			component.ImageID,
 		)
 	}
-	expected := expectedContainerLabels(system, component, "")
+	expected := expectedContainerLabels(scope, component, "")
 	for key, value := range expected {
 		if actual.Labels[key] != value {
 			return fmt.Errorf(
@@ -194,7 +197,7 @@ func verifyContainerCore(
 	if !reflect.DeepEqual(actual.Security, componentSecurity()) {
 		return fmt.Errorf("%s has unexpected security policy", component.Name)
 	}
-	expectedMounts := componentMounts(system, runtimeDir, component)
+	expectedMounts := componentMounts(scope, runtimeDir, component)
 	if !equalMounts(actual.Mounts, expectedMounts) {
 		return fmt.Errorf("%s has unexpected mounts", component.Name)
 	}
@@ -210,13 +213,13 @@ func verifyContainerCore(
 }
 
 func verifyCurrentContainer(
-	system string,
+	scope dockerScope,
 	runtimeDir string,
 	component composition.ResolvedComponent,
 	resource state.Resource,
 	actual engine.Container,
 ) error {
-	if err := verifyContainerCore(system, runtimeDir, component, resource, actual); err != nil {
+	if err := verifyContainerCore(scope, runtimeDir, component, resource, actual); err != nil {
 		return err
 	}
 	if !actual.OpenStdin || actual.StdinOnce || actual.TTY {
@@ -489,7 +492,7 @@ func verifyNetworkEndpointIdentity(
 }
 
 func componentMounts(
-	system string,
+	scope dockerScope,
 	runtimeDir string,
 	component composition.ResolvedComponent,
 ) []engine.Mount {
@@ -510,7 +513,7 @@ func componentMounts(
 	for _, volume := range component.Runtime.Volumes {
 		mounts = append(mounts, engine.Mount{
 			Type:     engine.MountVolume,
-			Source:   volumeName(system, component.Name, volume.Name),
+			Source:   volumeName(scope, component.Name, volume.Name),
 			Target:   volume.Target,
 			ReadOnly: volume.ReadOnly,
 		})
@@ -640,10 +643,11 @@ func (controller *Controller) ensureVolume(
 	component string,
 	logical string,
 ) error {
-	name := volumeName(system, component, logical)
+	scope := controller.dockerScope(system)
+	name := volumeName(scope, component, logical)
 	volume, err := controller.inspectVolume(ctx, name)
 	if err == nil {
-		return verifyVolume(system, component, logical, volume)
+		return verifyVolume(scope, component, logical, volume)
 	}
 	if !errors.Is(err, engine.ErrNotFound) {
 		return err
@@ -653,14 +657,14 @@ func (controller *Controller) ensureVolume(
 		callCtx,
 		engine.VolumeRequest{
 			Name:   name,
-			Labels: expectedVolumeLabels(system, component, logical),
+			Labels: expectedVolumeLabels(scope, component, logical),
 		},
 	)
 	cancel()
 	if createErr != nil {
 		return fmt.Errorf("create volume %s: %w", name, createErr)
 	}
-	if err := verifyVolume(system, component, logical, volume); err != nil {
+	if err := verifyVolume(scope, component, logical, volume); err != nil {
 		return err
 	}
 	controller.report("created persistent volume %s", name)
