@@ -21,10 +21,10 @@ const ConfigVersion = 2
 
 func DefaultRuntimeRoot(stateRoot string) (string, error) {
 	if root := os.Getenv("DCOMP_RUNTIME_ROOT"); root != "" {
-		if !filepath.IsAbs(root) || filepath.Clean(root) != root {
-			return "", fmt.Errorf("DCOMP_RUNTIME_ROOT must be an absolute clean path")
+		if !filepath.IsAbs(root) {
+			return "", fmt.Errorf("DCOMP_RUNTIME_ROOT must be an absolute path")
 		}
-		return root, nil
+		return filepath.Clean(root), nil
 	}
 	if !filepath.IsAbs(stateRoot) {
 		return "", fmt.Errorf("state root must be an absolute path")

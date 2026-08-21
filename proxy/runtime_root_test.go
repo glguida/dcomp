@@ -21,14 +21,14 @@ func TestDefaultRuntimeRootIsInsideStateRoot(t *testing.T) {
 func TestDefaultRuntimeRootHonoursEnvironmentOverride(t *testing.T) {
 	stateRoot := filepath.Join(t.TempDir(), "state")
 	override := filepath.Join(t.TempDir(), "proxy")
-	t.Setenv("DCOMP_RUNTIME_ROOT", override)
+	t.Setenv("DCOMP_RUNTIME_ROOT", override+string(filepath.Separator))
 
 	got, err := DefaultRuntimeRoot(stateRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got != override {
-		t.Fatalf("runtime root = %q, want override %q", got, override)
+		t.Fatalf("runtime root = %q, want cleaned override %q", got, override)
 	}
 }
 

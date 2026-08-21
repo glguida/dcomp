@@ -28,6 +28,27 @@ func TestRelativeStateRootIsRejectedBeforeDockerAccess(t *testing.T) {
 	}
 }
 
+func TestRootFlagsAcceptTrailingSeparators(t *testing.T) {
+	root := t.TempDir()
+	runtimeRoot := filepath.Join(t.TempDir(), "runtime")
+	t.Setenv("DOCKER_HOST", "unix://"+filepath.Join(root, "missing.sock"))
+	separator := string(filepath.Separator)
+
+	output, code := captureStdout(t, func() int {
+		return run([]string{
+			"--state-root", root + separator,
+			"--runtime-root", runtimeRoot + separator,
+			"ps", "--json",
+		})
+	})
+	if code != 0 {
+		t.Fatalf("trailing-separator roots exit code = %d, want 0", code)
+	}
+	if want := "{\"api_version\":2,\"components\":[]}\n"; output != want {
+		t.Fatalf("ps output = %q, want %q", output, want)
+	}
+}
+
 func TestPSJSONListsNoComponentsForEmptyState(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("DCOMP_STATE_ROOT", root)

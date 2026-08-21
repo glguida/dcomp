@@ -98,6 +98,7 @@ func run(arguments []string) int {
 		fmt.Fprintln(os.Stderr, "error: --state-root must be an absolute path")
 		return 2
 	}
+	root = filepath.Clean(root)
 	proxyRoot := *runtimeRoot
 	if proxyRoot == "" {
 		var err error
@@ -107,10 +108,11 @@ func run(arguments []string) int {
 			return 1
 		}
 	}
-	if !filepath.IsAbs(proxyRoot) || filepath.Clean(proxyRoot) != proxyRoot {
-		fmt.Fprintln(os.Stderr, "error: --runtime-root must be an absolute clean path")
+	if !filepath.IsAbs(proxyRoot) {
+		fmt.Fprintln(os.Stderr, "error: --runtime-root must be an absolute path")
 		return 2
 	}
+	proxyRoot = filepath.Clean(proxyRoot)
 
 	docker, err := dockerengine.NewFromEnvironment()
 	if err != nil {
