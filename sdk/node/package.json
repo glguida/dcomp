@@ -1,0 +1,37 @@
+{
+  "name": "@dcomp/component",
+  "version": "0.2.0",
+  "description": "Dependency-free Node.js helpers for DComp component sockets",
+  "type": "module",
+  "types": "./src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.mjs"
+    }
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "components",
+    "dcomp",
+    "unix-socket"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/glguida/dcomp.git",
+    "directory": "sdk/node"
+  }
+}

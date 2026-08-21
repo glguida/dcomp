@@ -4,3 +4,6 @@
 /.dcomp/
 *.test
 coverage.out
+__pycache__/
+*.py[cod]
+*.egg-info/

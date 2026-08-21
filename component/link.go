@@ -41,12 +41,10 @@ func endpointTarget(environment func(string) string, direction, slot string) (st
 		return "", err
 	}
 	target, ok := os.LookupEnv(name)
-	target = strings.TrimSpace(target)
-	if !ok || target == "" {
+	if !ok || strings.TrimSpace(target) == "" {
 		return "", fmt.Errorf("required dcomp %s %q is not configured (%s is empty)", direction, slot, name)
 	}
-	parsed, err := url.Parse(target)
-	if err != nil || parsed.Scheme != "unix" || !filepath.IsAbs(parsed.Path) || parsed.Host != "" {
+	if _, err := unixPath(target); err != nil {
 		return "", fmt.Errorf("%s must contain an absolute unix:/// path", name)
 	}
 	return target, nil
@@ -54,7 +52,16 @@ func endpointTarget(environment func(string) string, direction, slot string) (st
 
 func unixPath(target string) (string, error) {
 	parsed, err := url.Parse(target)
-	if err != nil || parsed.Scheme != "unix" || !filepath.IsAbs(parsed.Path) || parsed.Host != "" {
+	if err != nil ||
+		!strings.HasPrefix(target, "unix:///") ||
+		parsed.Scheme != "unix" ||
+		!filepath.IsAbs(parsed.Path) ||
+		filepath.Clean(parsed.Path) != parsed.Path ||
+		parsed.Host != "" ||
+		parsed.RawQuery != "" ||
+		parsed.Fragment != "" ||
+		strings.Contains(parsed.EscapedPath(), "%") ||
+		strings.ContainsRune(parsed.Path, '\x00') {
 		return "", fmt.Errorf("invalid DComp Unix address %q", target)
 	}
 	return parsed.Path, nil

@@ -77,7 +77,31 @@ It must not assume that one output has exactly one lifetime connection.
 DComp does not prescribe deadlines, request framing, retry semantics, or
 application-level health. Those belong to the selected protocol.
 
-## Optional Go/gRPC helper
+## Language helpers
+
+DComp ships dependency-free Python and Node.js packages in `sdk/python` and
+`sdk/node`, alongside the Go package. The common layer is deliberately small:
+
+- derive and validate `DCOMP_IN_*` and `DCOMP_OUT_*` names;
+- require a canonical absolute `unix:///` target;
+- expose either the URI or native Unix socket path; and
+- connect raw streams without binding an interface path.
+
+Python's `DialListener` returns claimed output sockets through the conventional
+`(connection, address)` accept shape. Node's `outputConnections()` yields the
+same kind of claimed sockets, while `serveOutput()` injects them into a native
+`net.Server` or `http.Server`. The Node helper also provides
+`inputHttpOptions()` for HTTP/1.1 clients such as ConnectRPC's Node transport.
+
+These helpers do not define an application protocol or depend on protobuf,
+gRPC, ConnectRPC, or Cyclo. Framework-specific packages remain free to layer
+their own health, reflection, routing, and graceful-shutdown behavior on top.
+The listener-style adapters wait for the consumer's first byte and are
+therefore intended for client-first protocols such as HTTP and gRPC.
+Server-first protocols can use the raw `connect_output()`/`connectOutput()`
+helpers and manage their connection pool explicitly.
+
+### Go/gRPC
 
 The `component` package validates addresses and adapts a gRPC server to the
 client-only output contract.
@@ -116,6 +140,29 @@ registered gRPC service is then available on each configured output.
 
 `ServeListener` remains available for tests and custom embedding. DComp-managed
 interface paths must still follow the client-only rule.
+
+### Python
+
+```python
+from dcomp_component import DialListener, connect_input
+
+upstream = connect_input("upstream")
+
+with DialListener("filtered") as listener:
+    connection, _address = listener.accept()
+    serve_protocol(connection)
+```
+
+### Node.js
+
+```js
+import { createServer } from "node:http";
+import { inputHttpOptions, serveOutput } from "@dcomp/component";
+
+const upstream = inputHttpOptions("upstream");
+const server = createServer(handler);
+await serveOutput(server, "filtered", { signal });
+```
 
 ## Image requirements
 

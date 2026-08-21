@@ -52,12 +52,21 @@ func TestEndpointTargetRequiresUnixValue(t *testing.T) {
 	if _, err := OutputTarget("missing"); err == nil {
 		t.Fatal("OutputTarget unexpectedly succeeded")
 	}
-	t.Setenv("DCOMP_OUT_MISSING", "dns:///old:50051")
-	if _, err := OutputTarget("missing"); err == nil {
-		t.Fatal("OutputTarget accepted the removed network contract")
-	}
-	t.Setenv("DCOMP_OUT_MISSING", "unix:relative.sock")
-	if _, err := OutputTarget("missing"); err == nil {
-		t.Fatal("OutputTarget accepted a relative Unix path")
+	for _, target := range []string{
+		" unix:///run/dcomp/out/missing",
+		"dns:///old:50051",
+		"unix:relative.sock",
+		"unix:/run/dcomp/out/missing",
+		"unix:////run/dcomp/out/missing",
+		"unix://host/run/dcomp/out/missing",
+		"unix:///run/dcomp/out/../missing",
+		"unix:///run/dcomp/out/%6dissing",
+		"unix:///run/dcomp/out/missing?query=yes",
+		"unix:///run/dcomp/out/missing#fragment",
+	} {
+		t.Setenv("DCOMP_OUT_MISSING", target)
+		if _, err := OutputTarget("missing"); err == nil {
+			t.Errorf("OutputTarget accepted invalid target %q", target)
+		}
 	}
 }

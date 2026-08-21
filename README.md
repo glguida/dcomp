@@ -81,8 +81,10 @@ Components must not bind or listen on these interface paths. The removed
 0.1 contract—`DCOMP_LINK_*`, Docker DNS, and fixed port `50051`—is not
 supported by 0.2 components.
 
-The optional Go/gRPC helper implements the client-only output side with a
-listener adapter over proxy connections:
+The repository ships small component helpers for Go, Python, and Node.js. All
+three validate the same environment contract and connect as clients; none
+binds a DComp interface path. The Go/gRPC helper implements the output side
+with a listener adapter over proxy connections:
 
 ```go
 target, err := component.InputTarget("upstream")
@@ -98,6 +100,14 @@ server, err := component.NewServer(component.WithOutput("filtered"))
 examplev1.RegisterDocumentsServer(server, implementation)
 err = server.Serve(ctx)
 ```
+
+The dependency-free [Python](sdk/python/README.md) and
+[Node.js](sdk/node/README.md) packages live in `sdk/python` and `sdk/node`.
+Python exposes raw connections and a `DialListener`; Node exposes raw
+connections, Unix HTTP client options, and an adapter for native
+`net.Server`/`http.Server` instances. They deliberately contain no protobuf
+or RPC dependency, so applications can layer gRPC, ConnectRPC, HTTP, or
+another stream protocol on top.
 
 Images must still declare a meaningful Docker `HEALTHCHECK`. The bundled
 `dcomp-healthcheck --socket PATH` can verify that an orchestrator-owned socket
@@ -146,13 +156,16 @@ for that readiness before creating or starting component containers.
 ## Build and install
 
 Requirements are Go 1.25 or newer, Linux, and a local Docker Engine with API
-1.44 or newer.
+1.44 or newer. The complete test suite additionally uses Python 3.10 or newer
+and Node.js 20 or newer for the component SDKs.
 
 ```sh
 make build
 make test
 sudo make install
 ```
+
+Run only the Python and Node.js SDK tests with `make sdk-test`.
 
 `make build` creates `bin/dcomp`, `bin/dcomp-proxy`, and
 `bin/dcomp-healthcheck`. The proxy binary must be installed beside `dcomp`;

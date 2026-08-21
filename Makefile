@@ -1,4 +1,6 @@
 GO ?= go
+PYTHON ?= python3
+NODE ?= node
 PROTOC ?= protoc
 INSTALL ?= install
 CGO_ENABLED ?= 0
@@ -14,7 +16,7 @@ PROTOC_VERSION := 35.1
 PROTOC_GEN_GO_VERSION := v1.36.11
 PROTOC_GEN_GO_GRPC_VERSION := v1.6.2
 
-.PHONY: all build test test-race install-test tools generate examples integration install uninstall clean
+.PHONY: all build test sdk-test test-race install-test tools generate examples integration install uninstall clean
 
 all: build
 
@@ -26,7 +28,13 @@ build:
 
 test:
 	$(GO) test ./...
+	$(MAKE) sdk-test
 	tools/install-test
+
+sdk-test:
+	PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$(CURDIR)/sdk/python/src" \
+		$(PYTHON) -m unittest discover -s sdk/python/tests
+	cd sdk/node && $(NODE) --test
 
 test-race:
 	$(GO) test -race ./...
