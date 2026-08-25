@@ -18,6 +18,7 @@ second_container_prefix="$second_resource_prefix.container"
 echo_network="$resource_prefix.component.echo"
 uppercase_network="$resource_prefix.component.uppercase"
 caller_network="$resource_prefix.component.caller"
+observer_network="$resource_prefix.component.observer"
 old_link_network="$resource_prefix.link.uppercase.upstream"
 attach_pid=
 
@@ -47,47 +48,71 @@ mkdir -p "$temporary/echo" "$temporary/uppercase" "$temporary/caller"
 cp "$root/examples/echo/component.dcomp" "$temporary/echo/component.dcomp"
 cp "$root/examples/uppercase/component.dcomp" "$temporary/uppercase/component.dcomp"
 cp "$root/examples/caller/component.dcomp" "$temporary/caller/component.dcomp"
-{
-    printf '%s\n' \
-        "system $name" \
-        "component echo echo" \
-        "component uppercase uppercase" \
-        "component caller caller" \
-        "args caller --wait" \
-        "publish uppercase tcp 127.0.0.1 0 8080" \
-        "egress uppercase" \
-        "link uppercase.upstream echo.echo" \
-        "link caller.upstream uppercase.echo"
-} >"$system_file"
+
+write_system() {
+    include_transient=$1
+    {
+        printf '%s\n' \
+            "system $name" \
+            "component echo echo" \
+            "component uppercase uppercase" \
+            "component caller caller" \
+            "component observer caller"
+        if [ "$include_transient" = yes ]; then
+            printf '%s\n' "component transient caller"
+        fi
+        printf '%s\n' \
+            "args caller --timeout 250ms --repeat 20ms caller-survivor" \
+            "args observer --timeout 250ms --repeat 20ms observer-survivor"
+        if [ "$include_transient" = yes ]; then
+            printf '%s\n' "args transient --timeout 250ms --repeat 20ms transient-spoke"
+        fi
+        printf '%s\n' \
+            "publish uppercase tcp 127.0.0.1 0 8080" \
+            "egress uppercase" \
+            "link uppercase.upstream echo.echo" \
+            "link caller.upstream uppercase.echo" \
+            "link observer.upstream uppercase.echo"
+        if [ "$include_transient" = yes ]; then
+            printf '%s\n' "link transient.upstream uppercase.echo"
+        fi
+    } >"$system_file"
+}
+
+wait_healthy() {
+    attempt=0
+    while ! status=$(dcomp status --json "$name" 2>&1); do
+        attempt=$((attempt + 1))
+        if [ "$attempt" -ge 30 ]; then
+            printf '%s\n' "$status" >&2
+            echo "integration: system did not become healthy" >&2
+            return 1
+        fi
+        sleep 1
+    done
+    printf '%s\n' "$status"
+}
+
+write_system no
 
 dcomp check "$system_file"
 dcomp up "$system_file"
-
-attempt=0
-while ! status=$(dcomp status --json "$name" 2>&1); do
-    attempt=$((attempt + 1))
-    if [ "$attempt" -ge 30 ]; then
-        printf '%s\n' "$status" >&2
-        echo "integration: system did not become healthy" >&2
-        exit 1
-    fi
-    sleep 1
-done
-printf '%s\n' "$status"
+wait_healthy
 
 proxy_pid=$(sed -n '1p' "$runtime_root/$name/proxy.pid")
 [ -n "$proxy_pid" ] && kill -0 "$proxy_pid"
 [ -S "$runtime_root/$name/proxy.sock" ]
 [ -S "$runtime_root/$name/in/uppercase.upstream" ]
 [ -S "$runtime_root/$name/in/caller.upstream" ]
+[ -S "$runtime_root/$name/in/observer.upstream" ]
 [ -S "$runtime_root/$name/out/echo.echo" ]
 [ -S "$runtime_root/$name/out/uppercase.echo" ]
 
-for component in echo caller; do
+for component in echo caller observer; do
     [ "$(docker container inspect "$container_prefix.$component" \
         --format '{{.HostConfig.NetworkMode}}')" = "none" ]
 done
-for network in "$echo_network" "$caller_network"; do
+for network in "$echo_network" "$caller_network" "$observer_network"; do
     if docker network inspect "$network" >/dev/null 2>&1; then
         echo "integration: component without egress received network $network" >&2
         exit 1
@@ -132,10 +157,17 @@ call_system() {
 reply=$(call_system "hello components")
 [ "$reply" = "HELLO COMPONENTS" ]
 metrics=$(curl -fsS "http://127.0.0.1:$admin_port/metrics")
-printf '%s\n' "$metrics" |
-    grep '^dcomp_example_uppercase_requests_total 1$' >/dev/null
+initial_request_count=$(printf '%s\n' "$metrics" |
+    awk '$1 == "dcomp_example_uppercase_requests_total" { print $2 }')
+case "$initial_request_count" in
+    ''|*[!0-9]*)
+        echo "integration: invalid initial request count $initial_request_count" >&2
+        exit 1
+        ;;
+esac
+[ "$initial_request_count" -ge 1 ]
 
-for component in echo uppercase caller; do
+for component in echo uppercase caller observer; do
     environment=$(docker container inspect "$container_prefix.$component" \
         --format '{{range .Config.Env}}{{println .}}{{end}}')
     if printf '%s\n' "$environment" | grep '^DCOMP_LINK_' >/dev/null; then
@@ -152,8 +184,170 @@ interface_mounts() {
 }
 [ "$(interface_mounts echo)" = "/run/dcomp/out/echo" ]
 [ "$(interface_mounts caller)" = "/run/dcomp/in/upstream" ]
+[ "$(interface_mounts observer)" = "/run/dcomp/in/upstream" ]
 uppercase_mounts=$(interface_mounts uppercase)
 [ "$uppercase_mounts" = "$(printf '%s\n' /run/dcomp/in/upstream /run/dcomp/out/echo)" ]
+
+request_count() {
+    curl -fsS "http://127.0.0.1:$admin_port/metrics" |
+        awk '$1 == "dcomp_example_uppercase_requests_total" { print $2 }'
+}
+
+wait_for_request_growth() {
+    before=$1
+    attempt=0
+    while :; do
+        current=$(request_count)
+        case "$current" in
+            ''|*[!0-9]*)
+                echo "integration: invalid request count $current" >&2
+                return 1
+                ;;
+        esac
+        if [ "$current" -gt "$before" ]; then
+            printf '%s\n' "$current"
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        if [ "$attempt" -ge 30 ]; then
+            echo "integration: continuous spoke traffic stopped at $current" >&2
+            return 1
+        fi
+        sleep 1
+    done
+}
+
+wait_for_proxy_pair() {
+    input_component=$1
+    input_endpoint=$2
+    output_component=$3
+    output_endpoint=$4
+    attempt=0
+    while ! grep -F "connection paired input=input/$input_component/$input_endpoint output=output/$output_component/$output_endpoint" \
+        "$runtime_root/$name/proxy.log" >/dev/null; do
+        attempt=$((attempt + 1))
+        if [ "$attempt" -ge 30 ]; then
+            echo "integration: $input_component.$input_endpoint did not establish its long-lived proxy pair" >&2
+            return 1
+        fi
+        sleep 1
+    done
+}
+
+surviving_link_closures() {
+    input_component=$1
+    input_endpoint=$2
+    output_component=$3
+    output_endpoint=$4
+    awk -v pair="connection closed input=input/$input_component/$input_endpoint output=output/$output_component/$output_endpoint" \
+        'index($0, pair) { count++ } END { print count + 0 }' \
+        "$runtime_root/$name/proxy.log"
+}
+
+container_started_at() {
+    docker container inspect "$container_prefix.$1" --format '{{.State.StartedAt}}'
+}
+
+assert_survivors_unchanged() {
+    [ "$(docker container inspect "$container_prefix.echo" --format '{{.ID}}')" = "$echo_id" ]
+    [ "$(docker container inspect "$container_prefix.uppercase" --format '{{.ID}}')" = "$uppercase_id" ]
+    [ "$(docker container inspect "$container_prefix.caller" --format '{{.ID}}')" = "$caller_id" ]
+    [ "$(docker container inspect "$container_prefix.observer" --format '{{.ID}}')" = "$observer_id" ]
+    [ "$(container_started_at echo)" = "$echo_started_at" ]
+    [ "$(container_started_at uppercase)" = "$uppercase_started_at" ]
+    [ "$(container_started_at caller)" = "$caller_started_at" ]
+    [ "$(container_started_at observer)" = "$observer_started_at" ]
+    [ "$(sed -n '1p' "$runtime_root/$name/proxy.pid")" = "$proxy_pid" ]
+    [ "$(stat -c '%i' "$runtime_root/$name/in/uppercase.upstream")" = "$uppercase_input_inode" ]
+    [ "$(stat -c '%i' "$runtime_root/$name/in/caller.upstream")" = "$caller_input_inode" ]
+    [ "$(stat -c '%i' "$runtime_root/$name/in/observer.upstream")" = "$observer_input_inode" ]
+    [ "$(stat -c '%i' "$runtime_root/$name/out/echo.echo")" = "$echo_output_inode" ]
+    [ "$(stat -c '%i' "$runtime_root/$name/out/uppercase.echo")" = "$uppercase_output_inode" ]
+}
+
+wait_for_proxy_pair caller upstream uppercase echo
+wait_for_proxy_pair observer upstream uppercase echo
+wait_for_proxy_pair uppercase upstream echo echo
+echo_id=$(docker container inspect "$container_prefix.echo" --format '{{.ID}}')
+uppercase_id=$(docker container inspect "$container_prefix.uppercase" --format '{{.ID}}')
+caller_id=$(docker container inspect "$container_prefix.caller" --format '{{.ID}}')
+observer_id=$(docker container inspect "$container_prefix.observer" --format '{{.ID}}')
+echo_started_at=$(container_started_at echo)
+uppercase_started_at=$(container_started_at uppercase)
+caller_started_at=$(container_started_at caller)
+observer_started_at=$(container_started_at observer)
+uppercase_input_inode=$(stat -c '%i' "$runtime_root/$name/in/uppercase.upstream")
+caller_input_inode=$(stat -c '%i' "$runtime_root/$name/in/caller.upstream")
+observer_input_inode=$(stat -c '%i' "$runtime_root/$name/in/observer.upstream")
+echo_output_inode=$(stat -c '%i' "$runtime_root/$name/out/echo.echo")
+uppercase_output_inode=$(stat -c '%i' "$runtime_root/$name/out/uppercase.echo")
+caller_link_closures=$(surviving_link_closures caller upstream uppercase echo)
+observer_link_closures=$(surviving_link_closures observer upstream uppercase echo)
+uppercase_link_closures=$(surviving_link_closures uppercase upstream echo echo)
+traffic=$(request_count)
+traffic=$(wait_for_request_growth "$traffic")
+
+# Attach one spoke. Every pre-existing container, endpoint inode, and live
+# surviving link must remain while the proxy publishes only the new input.
+write_system yes
+dcomp check "$system_file"
+dcomp up "$system_file"
+wait_healthy >/dev/null
+assert_survivors_unchanged
+[ -S "$runtime_root/$name/in/transient.upstream" ]
+transient_id=$(docker container inspect "$container_prefix.transient" --format '{{.ID}}')
+wait_for_proxy_pair transient upstream uppercase echo
+traffic=$(wait_for_request_growth "$traffic")
+[ "$(surviving_link_closures caller upstream uppercase echo)" = "$caller_link_closures" ]
+[ "$(surviving_link_closures observer upstream uppercase echo)" = "$observer_link_closures" ]
+[ "$(surviving_link_closures uppercase upstream echo echo)" = "$uppercase_link_closures" ]
+
+# Detach that spoke. Its container and socket disappear, while both surviving
+# spokes continue on the same connections and socket inodes.
+write_system no
+dcomp up "$system_file"
+wait_healthy >/dev/null
+assert_survivors_unchanged
+if docker container inspect "$transient_id" >/dev/null 2>&1; then
+    echo "integration: detached transient spoke container still exists" >&2
+    exit 1
+fi
+[ ! -e "$runtime_root/$name/in/transient.upstream" ]
+traffic=$(wait_for_request_growth "$traffic")
+[ "$(surviving_link_closures caller upstream uppercase echo)" = "$caller_link_closures" ]
+[ "$(surviving_link_closures observer upstream uppercase echo)" = "$observer_link_closures" ]
+[ "$(surviving_link_closures uppercase upstream echo echo)" = "$uppercase_link_closures" ]
+
+# A stopped, definition-identical component remains the same container even
+# when its egress attachment also needs repair. Docker must receive the network
+# attachment before DComp starts the retained container.
+docker stop "$container_prefix.uppercase" >/dev/null
+docker network disconnect "$uppercase_network" "$container_prefix.uppercase"
+dcomp up "$system_file"
+wait_healthy >/dev/null
+[ "$(docker container inspect "$container_prefix.echo" --format '{{.ID}}')" = "$echo_id" ]
+[ "$(docker container inspect "$container_prefix.uppercase" --format '{{.ID}}')" = "$uppercase_id" ]
+[ "$(docker container inspect "$container_prefix.caller" --format '{{.ID}}')" = "$caller_id" ]
+[ "$(docker container inspect "$container_prefix.observer" --format '{{.ID}}')" = "$observer_id" ]
+[ "$(container_started_at echo)" = "$echo_started_at" ]
+[ "$(container_started_at caller)" = "$caller_started_at" ]
+[ "$(container_started_at observer)" = "$observer_started_at" ]
+[ "$(container_started_at uppercase)" != "$uppercase_started_at" ]
+[ "$(sed -n '1p' "$runtime_root/$name/proxy.pid")" = "$proxy_pid" ]
+[ "$(stat -c '%i' "$runtime_root/$name/in/uppercase.upstream")" = "$uppercase_input_inode" ]
+[ "$(stat -c '%i' "$runtime_root/$name/out/uppercase.echo")" = "$uppercase_output_inode" ]
+[ "$(docker network inspect "$uppercase_network" --format '{{len .Containers}}')" = "1" ]
+[ "$(docker container inspect "$container_prefix.uppercase" \
+    --format '{{len .NetworkSettings.Networks}}')" = "1" ]
+admin_port=$(docker container inspect "$container_prefix.uppercase" \
+    --format '{{(index (index .NetworkSettings.Ports "8080/tcp") 0).HostPort}}')
+case "$admin_port" in
+    ''|*[!0-9]*)
+        echo "integration: invalid restarted dynamic admin port $admin_port" >&2
+        exit 1
+        ;;
+esac
+traffic=$(wait_for_request_growth "$traffic")
 
 attach_ready="$temporary/attach.ready"
 attach_stdout="$temporary/attach.stdout"
@@ -200,11 +394,11 @@ printf '%s\n' "$logs" |
 printf '%s\n' "$logs" |
     awk -F '\t' '$2 == "echo" && $4 ~ /rpc=\/dcomp.example.v1.Echo\/Echo/ { found = 1 } END { exit !found }'
 
-echo_id=$(docker container inspect "$container_prefix.echo" --format '{{.ID}}')
-uppercase_id=$(docker container inspect "$container_prefix.uppercase" --format '{{.ID}}')
 dcomp restart "$name" uppercase
 [ "$(docker container inspect "$container_prefix.echo" --format '{{.ID}}')" = "$echo_id" ]
 [ "$(docker container inspect "$container_prefix.uppercase" --format '{{.ID}}')" = "$uppercase_id" ]
+[ "$(docker container inspect "$container_prefix.caller" --format '{{.ID}}')" = "$caller_id" ]
+[ "$(docker container inspect "$container_prefix.observer" --format '{{.ID}}')" = "$observer_id" ]
 [ "$(sed -n '1p' "$runtime_root/$name/proxy.pid")" = "$proxy_pid" ]
 
 attempt=0
@@ -229,7 +423,7 @@ while ! dcomp_second status --json "$name" >/dev/null 2>&1; do
     fi
     sleep 1
 done
-for component in echo uppercase caller; do
+for component in echo uppercase caller observer; do
     docker container inspect "$container_prefix.$component" >/dev/null
     docker container inspect "$second_container_prefix.$component" >/dev/null
 done
@@ -239,7 +433,7 @@ docker network inspect "$uppercase_network" >/dev/null
 docker network inspect "$second_uppercase_network" >/dev/null
 
 dcomp down "$name"
-for network in "$echo_network" "$uppercase_network" "$caller_network"; do
+for network in "$echo_network" "$uppercase_network" "$caller_network" "$observer_network"; do
     if docker network inspect "$network" >/dev/null 2>&1; then
         echo "integration: network $network still exists after down" >&2
         exit 1
@@ -256,7 +450,7 @@ fi
 [ ! -e "$runtime_root/$name" ]
 
 dcomp_second status --json "$name" >/dev/null
-for component in echo uppercase caller; do
+for component in echo uppercase caller observer; do
     docker container inspect "$second_container_prefix.$component" >/dev/null
 done
 docker network inspect "$second_uppercase_network" >/dev/null
