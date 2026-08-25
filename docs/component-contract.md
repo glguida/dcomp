@@ -69,10 +69,13 @@ the proxy rather than binding a local address.
 The proxy pairs one input connection with one connection from the linked
 output. It forwards an opaque, ordered byte stream in both directions.
 
-Components should tolerate connection refusal during startup, EOF when a peer
-restarts, and reconnect with bounded backoff. A producer output may receive
-several independent connections when it fans out or when clients reconnect.
-It must not assume that one output has exactly one lifetime connection.
+Components MUST treat connection loss as reconnectable. Consumers MUST retry
+failed connects with bounded backoff. Producers MUST detect dying dialed
+streams and reconnect to maintain their output pool. Link removal during
+minimal reconciliation deliberately closes both sides, just as a peer restart
+already can. A producer output may receive several independent connections
+when it fans out or when clients reconnect; it must not assume that one output
+has exactly one lifetime connection.
 
 DComp does not prescribe deadlines, request framing, retry semantics, or
 application-level health. Those belong to the selected protocol.

@@ -33,7 +33,7 @@ dcomp version --json
 ```
 
 ```json
-{"version":"0.2.0","api_version":2}
+{"version":"0.2.1","api_version":2}
 ```
 
 - `version` is the DComp semantic version string.
@@ -106,13 +106,16 @@ Top-level fields:
 - `digest` is the target digest during an operation, the committed system
   digest otherwise, or an empty string for an absent system.
 - `operation` is empty or one of `apply`, `down`, or `restart`.
-- `phase` is empty or one of `retire`, `networks`, `proxy`, `create`, `attach`,
+- `phase` is empty or one of `retire`, `networks`, `resync`, `create`, `attach`,
   `start`, `commit`, `restart`, `down`, or `abort`.
 - `proxy` is always an object. Its identity strings and PID are empty/zero when
-  no proxy is recorded. `active_connections` counts active proxy stream pairs,
-  not idle producer connections. When available, `links` contains one item per
-  declared link with its active-pair gauge and cumulative directional bytes.
-  Byte counters reset when the proxy process is replaced.
+  no proxy is recorded. `proxy.digest` is the wiring digest observed from the
+  live proxy, not part of process identity; it is omitted while resync is not
+  converged. `active_connections` counts active proxy stream pairs, not idle
+  producer connections. When available, `links` contains one item per full
+  link identity with its active-pair gauge and cumulative directional bytes.
+  Byte counters reset when the proxy process is replaced or a removed link is
+  recreated.
 - `networks` contains the target or committed component egress networks.
 - `components` contains the target or committed component records, sorted by
   component name.
@@ -169,7 +172,6 @@ An absent system is a successful observation with a non-operational result:
   "phase": "",
   "proxy": {
     "instance_id": "",
-    "digest": "",
     "pid": 0,
     "ready": false,
     "inputs": 0,

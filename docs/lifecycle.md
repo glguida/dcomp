@@ -16,7 +16,7 @@ namespace. Every owned container, egress network, and named volume includes
 that namespace in both its physical name and ownership labels, so another
 state root can control an independently named system on the same Engine.
 
-State format 3, introduced by DComp 0.2, records:
+State format 4, introduced by DComp 0.2.1, records:
 
 - the canonical resolved system and digest;
 - the transient runtime root;
@@ -24,9 +24,14 @@ State format 3, introduced by DComp 0.2, records:
 - the proxy instance ID, PID, wiring digest, runtime directory, control
   socket, and log path;
 - operation phase and completed step keys;
+- for apply operations, the complete target wiring and its
+  process-independent digest;
 - endpoint-cleanup records containing the exact container, network, endpoint
   name, and immutable endpoint ID; and
 - create requests whose result may have been lost.
+
+Earlier state formats and engine bindings are rejected. DComp does not infer
+new digest or wiring semantics from an older record.
 
 Named volumes have deterministic names rather than immutable IDs. Their
 driver and complete DComp ownership label set are verified on every use.
@@ -41,31 +46,29 @@ recorded immutable ID and verifies the expected namespace, name, image,
 labels, launch security, mounts, environment, ports, and network attachments.
 
 The proxy is controlled through its Unix control socket. Requests carry the
-recorded instance ID; status must return the same ID, wiring digest, and PID.
+recorded instance ID; status must return the same process ID and PID. The
+wiring digest is mutable observed state rather than process identity.
 DComp does not send a fallback signal to a PID unless that live identity was
 just verified. This prevents a stale state record from signalling an unrelated
 process after PID reuse.
 
 ## Apply operation
 
-The 0.2 apply phase sequence is:
+The 0.2.1 apply phase sequence is:
 
 ```text
-retire -> networks -> proxy -> create -> attach -> start -> commit
+retire -> networks -> resync -> create -> attach -> start -> commit
 ```
 
 ### Retire
 
 DComp preflights the complete previous deployment and all target names before
-the first destructive call. Components whose immutable component digest and
-socket mounts remain valid may be retained.
-
-The target proxy digest covers runtime directory, endpoints, and links. If it
-matches the running recorded proxy, that process can be retained. If wiring
-changes or the proxy is absent, no component container is retained: a Docker
-bind mount points to a particular socket inode and cannot follow a pathname to
-a newly created listener. DComp retires those containers, then stops the old
-proxy.
+the first destructive call. A component is retained when its
+container-definition digest is unchanged and the recorded proxy is still
+identity-verified. That digest covers image ID, runtime policy, publications,
+egress, mounts, and the component's own endpoint set; it deliberately excludes
+link targets. Components being removed or recreated are stopped and removed
+before socket publication.
 
 Before removing an egress container, DComp inspects its recorded bridge and
 durably journals the exact Docker endpoint name and immutable endpoint ID.
@@ -75,8 +78,8 @@ endpoint, resume first confirms both the recorded container ID and name are
 absent, verifies the endpoint and network identities, force-disconnects that
 exact endpoint by name, and reinspects the network. An unmatched endpoint is
 never removed. This reconciliation runs before strict unknown-member
-preflight and can derive the journal entry for an interrupted state-format-3
-operation that predates this fix.
+preflight and can derive cleanup authority when a recorded container
+disappeared out of band before DComp could journal its endpoint.
 
 ### Networks
 
@@ -89,20 +92,34 @@ Network create intent is durable before the Docker request. If the response is
 lost, resume inspects the deterministic name, requires the current operation
 label, and records the returned immutable ID.
 
-### Proxy
+### Resync
 
-DComp derives strict JSON wiring and durably marks the proxy create pending.
-The process creates all endpoint and control listeners, writes its PID and
-readiness files, and reports readiness through an inherited descriptor.
+If no proxy runs, DComp starts one with the complete target wiring as before.
+Otherwise it verifies immutable process identity and sends the complete
+journaled wiring and digest. The proxy prepares new listeners at temporary
+names, atomically publishes additions and swaps the routing table under one
+lock, then tears down removed listeners and link-owned connections. It reports
+the target digest only after teardown completes. During commit or teardown it
+reports `ready=false` and no digest.
 
-If the parent command loses the start result, resume uses the existing config,
-PID file, and identity-checked control status to recover the exact process. A
+An endpoint whose identity survives is never rebound, renamed, or unlinked.
+Retained containers therefore keep the socket inode pinned by their bind mount,
+and established streams on surviving links remain open. Removed links close
+both directions immediately. Pending inputs belong to their captured full link
+identity; pending outputs remain in their endpoint pool while any target link
+can consume them.
+
+If the parent command loses a proxy start result, resume uses the existing
+config, PID file, and identity-checked status to recover the exact process. A
 different live proxy in the same runtime directory is never replaced.
 
-If that proxy later disappears before commit, resume first removes the target
-containers so no bind mount can retain one of its old socket inodes, returns
-the operation to this phase, and recreates the proxy and containers.
-Superseding the interrupted target performs the same cleanup before abort.
+Resume dispatches by observed digest. The previous digest is resynced again;
+the target digest continues with create; a non-converged or unexpected digest
+is retried and then identity-verified shutdown falls back to full replacement.
+A dead proxy takes the same full-replacement path. That fallback removes every
+socket-mounted target container before publishing replacement sockets.
+Process-identity, proxy-format, and control-protocol mismatches are terminal;
+they never enter replacement fallback.
 
 ### Create
 
@@ -137,18 +154,20 @@ and proxy identities to `desired.json`, then clears the operation.
 
 ## Incremental changes
 
-Component digests cover immutable image ID, endpoint definition, normalized
-runtime policy, and inbound target identity. The proxy has a separate wiring
-digest.
+Container-definition digests cover immutable image ID, the component's own
+endpoint definition, and normalized runtime policy. Link targets are excluded.
+The proxy has a separate wiring digest over endpoint triples and full link
+pairs only.
 
 - An image-only change replaces that component while retaining the proxy and
   unrelated running containers.
-- A link or endpoint change replaces the proxy and all socket-mounted
-  containers.
+- Adding a component publishes its listeners and creates only that container.
+- Removing a component retires it, then removes only its endpoints and links.
+- Relinking existing endpoints performs zero container operations.
+- Changing a component's own endpoint set recreates only that component and
+  resyncs the proxy.
 - Runtime-root changes likewise replace the proxy and containers.
 - Named volumes survive every replacement.
-
-Dynamic rewiring without component restart is intentionally not implemented.
 
 ## Resume, supersede, and abort
 
@@ -159,11 +178,13 @@ steps converge by inspecting ownership and immutable identity before mutation.
 runtime root match. Otherwise it first resolves pending creates and safely
 aborts the stale target before applying the new one.
 
-`dcomp abort NAME` is not rollback. For an interrupted apply it removes only
-operation-owned target containers, proxy, and networks that were not part of
-the previous committed deployment, then republishes the previous state record.
-If earlier phases already retired previous resources, a later `up` repairs
-them. Abort refuses to proceed while any create result remains unresolved.
+`dcomp abort NAME` removes operation-owned target containers first, then
+reverse-resyncs the retained proxy to the previous committed wiring. It remains
+not-rollback in the general case because resources retired earlier may already
+be gone, but a successful reverse resync approximates rollback. If reverse
+resync transiently cannot converge, abort takes the full-replacement path and
+recreates the previous fleet. Identity or protocol mismatches are terminal.
+Abort refuses to proceed while any create result remains unresolved.
 
 Non-apply operations can be aborted by clearing their durable operation after
 the command has established that no create is pending.
@@ -181,9 +202,13 @@ the command has established that no create is pending.
 Container removal during `down` and abort uses the same durable endpoint
 transaction as apply retirement.
 
-Proxy cleanup removes endpoint/control sockets, PID, readiness, config, log,
-and the system runtime directory. Unexpected non-socket entries are not
-silently deleted.
+Proxy cleanup removes readiness and only endpoint/control socket objects proven
+owned by its internal ledger. It removes the PID completion marker after the
+ledger is empty; manager cleanup then removes config, log, and empty runtime
+directories. A pathname relinquished by resync is never reclaimed from wiring
+config or directory membership; if another owner reuses it, that object and
+any non-empty containing directories remain. Unexpected non-socket entries are
+not silently deleted.
 
 ## Restart
 
@@ -225,3 +250,6 @@ attaches standard I/O.
 11. Ambiguous create results remain durable until resolved.
 12. Egress-container retirement is complete only after its recorded endpoint
     is proven absent.
+13. Within one system runtime directory, a retained endpoint identity keeps the
+    same socket inode across every resync.
+14. At each endpoint publication, no existing container mounts that host path.

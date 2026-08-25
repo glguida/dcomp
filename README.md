@@ -1,4 +1,4 @@
-<img src="docs/assets/banner.svg" alt="dcomp — Components, wired by hand. A Docker component substrate. V0.2.0, MIT, Linux, Docker Engine 25+." width="100%">
+<img src="docs/assets/banner.svg" alt="dcomp — Components, wired by hand. A Docker component substrate. V0.2.1, MIT, Linux, Docker Engine 25+." width="100%">
 
 # DComp
 
@@ -81,7 +81,9 @@ state root also selects an independent proxy and socket tree by default:
 ├── proxy.pid
 ├── proxy.log
 ├── proxy.ready
+├── proxy.ownership.json
 ├── proxy.sock
+├── .a-*                    # private socket-identity anchors
 ├── in/
 │   └── <instance>.<input>
 └── out/
@@ -90,7 +92,8 @@ state root also selects an independent proxy and socket tree by default:
 
 Use `--runtime-root DIR` or `DCOMP_RUNTIME_ROOT` when another absolute host
 path is required. The runtime tree is reconstructible even though its default
-location is inside the durable state root.
+location is inside the durable state root. The ownership ledger and anchors
+are proxy-internal recovery artifacts; components never mount them.
 
 Inside a component, only its own endpoints are mounted:
 
@@ -186,16 +189,31 @@ the same system name independently on one Docker Engine.
 
 State records immutable container and network IDs plus the proxy instance ID,
 PID, wiring digest, control socket, log path, and runtime directory. An
-incomplete operation may also journal the exact endpoint identity that must be
-removed after its container. Proxy shutdown verifies the control-socket
+incomplete apply operation also journals its complete target wiring; any
+operation may journal the exact network endpoint identity that must be removed
+after its container. Proxy shutdown and resync verify the control-socket
 identity before signalling a recorded PID, avoiding unsafe PID-only process
 control.
 
 Changing only one image can retain unrelated containers and the existing
-proxy. Changing endpoints or links replaces the proxy and component
-containers, because individual Docker socket bind mounts retain the old socket
-inode. Dynamic rewiring without component restart is deliberately outside the
-0.2 scope.
+proxy. Adding or removing a component publishes or removes only its endpoint
+sockets. Relinking existing endpoints performs no container operation. The
+proxy never rebinds a surviving endpoint identity, so Docker's per-file socket
+mounts retain the same inode and established streams on surviving links remain
+open.
+
+## Migration from 0.2.0
+
+The component addresses and wire contract are unchanged, so existing 0.2
+component images and SDKs remain valid. Host state and live proxies are not
+upgrade-compatible: DComp 0.2.1 rejects 0.2.0 durable state, engine bindings,
+proxy configurations, and control protocols without mutating them.
+
+Before installing 0.2.1, run `dcomp down NAME` for every system with the 0.2.0
+binary, then remove the old DComp state root. Reusing the same cleaned state-
+root path preserves its deterministic Docker namespace; `down` does not remove
+declared named volumes. Back up important volume data before an upgrade as
+usual. A 0.2.0 system left running must be shut down with the 0.2.0 binary.
 
 ## Migration from 0.1.x
 
@@ -218,8 +236,8 @@ Per-link Docker bridges and `DCOMP_LINK_*` are removed completely.
 ## Deliberate limits
 
 DComp 0.2 provides no multi-host overlay, replicas, automatic failover,
-encryption, dynamic rewiring, arbitrary Docker option passthrough, secret
-store, image build/pull workflow, or long-lived control-plane daemon. Unix
+encryption, arbitrary Docker option passthrough, secret store, image build/pull
+workflow, or long-lived control-plane daemon. Unix
 socket permissions are the local trust boundary; optional peer-credential
 policy can be added without changing the component address contract.
 

@@ -107,18 +107,35 @@ without restarting the proxy or its peers.
 ## Proxy process and readiness
 
 `dcomp-proxy` receives a strict JSON configuration containing the system,
-instance identity, wiring digest, endpoint paths, and links. It creates all
-listeners, writes `proxy.pid` and `proxy.ready`, opens a local control socket,
-then signals readiness through an inherited file descriptor. Components do not
-start before that signal.
+instance identity, wiring digest, endpoint paths, and links. Before publishing
+any socket it writes `proxy.pid` and creates an internal socket-ownership
+ledger. It then publishes the control and endpoint listeners, writes
+`proxy.ready`, and signals readiness through an inherited file descriptor.
+Components do not start before that signal.
 
-The control socket supports identity-checked status and graceful shutdown.
-Status reports the PID, wiring digest, endpoint counts, pending connections,
-and system-wide active stream-pair count. It also reports, for every declared
-link, its active stream-pair gauge and cumulative bytes successfully forwarded
-in both directions. Counters live for one proxy process and reset when that
-proxy is replaced. A shutdown request must carry the recorded proxy instance
-ID.
+The ledger, rather than the wiring config or a runtime-directory scan, is the
+source of pathname cleanup authority. Each socket has a private hard-link
+anchor that keeps its inode alive while public names are removed. Records move
+through `reserved`, `anchored`, and `released` states, so live teardown,
+graceful shutdown, and dead-process cleanup all use the same idempotent
+transition. A reused public pathname is preserved because it is not the same
+file as the anchor. `proxy.pid` disappears only after the ledger is empty;
+therefore an absent PID marker from a current proxy proves pathname cleanup has
+finished and manager cleanup performs no socket sweep.
+
+The control socket supports status, graceful shutdown, and resync. Every
+request carries the recorded proxy instance ID and the exact current control-
+protocol version; a mismatch is rejected before command dispatch. Shutdown and
+resync are serialized. Messages are newline-delimited JSON limited to 16 MiB
+in both directions.
+
+Status reports the PID, mutable wiring digest, readiness, endpoint counts,
+pending connections, and system-wide active stream-pair count. During a resync
+transition it reports `ready=false` without claiming a digest. For every
+declared full link identity it also reports an active-pair gauge and cumulative
+bytes successfully forwarded in both directions. Surviving links keep their
+counters; counters reset when a proxy is replaced or a removed link is
+recreated.
 
 Unix socket pathnames have a small kernel limit. If a valid runtime endpoint
 would exceed it, the proxy binds a deterministic short path in a private,
@@ -127,6 +144,10 @@ socket inode into the documented runtime tree. Keeping both names on the same
 filesystem also works when `/var/run` and `/tmp` are different mounts. Docker
 still mounts the named runtime-tree file and the container address remains
 unchanged.
+
+The ownership ledger and anchors are disposable runtime metadata, not part of
+the machine API or durable DComp state format. They do not change endpoint
+paths, bind mounts, or the component wire contract.
 
 Endpoint sockets are mode `0666` because component images may run under
 arbitrary non-root UIDs. Runtime directories, configuration, PID, readiness,
@@ -146,11 +167,12 @@ For a new deployment DComp:
 6. starts components; and
 7. commits Docker and proxy identities as desired state.
 
-An image-only change may keep the proxy and unrelated containers. A wiring or
-endpoint change gets a new proxy wiring digest. DComp then retires containers,
-stops the old proxy, starts the new proxy, and recreates containers so their
-individual bind mounts refer to the new socket inodes. This is why dynamic
-rewiring without component restart is not a 0.2 feature.
+An image-only change keeps the proxy and unrelated containers. Wiring changes
+resync the live proxy: unchanged endpoint identities keep their socket inodes,
+surviving links keep established streams, and only removed links are cut.
+Changing a component's own endpoint set first retires that component, so no
+container mounts a path when the proxy publishes its new listener. A runtime-
+root change still replaces the complete proxy and socket-mounted fleet.
 
 `down` verifies recorded ownership, stops/removes component containers first,
 stops the proxy second, then removes transient egress networks. Named volumes
@@ -189,7 +211,6 @@ socket. Components receive no Docker socket. Fixed container policy enables an
 init process, restart policy `no`, `no-new-privileges`, drops `NET_RAW`, and
 sets a 2048-process limit.
 
-Version 0.2 deliberately has no multi-host overlay, runtime rewiring,
-replication, automatic failover, payload inspection, protocol translation,
-encryption, arbitrary environment or privilege passthrough, or global
-long-lived daemon.
+Version 0.2 deliberately has no multi-host overlay, replication, automatic
+failover, payload inspection, protocol translation, encryption, arbitrary
+environment or privilege passthrough, or global long-lived daemon.

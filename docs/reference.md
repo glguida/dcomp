@@ -25,6 +25,9 @@ The global options are:
 The state-root precedence is `--state-root`, `DCOMP_STATE_ROOT`,
 `$XDG_STATE_HOME/dcomp`, then `$HOME/.local/state/dcomp`. The runtime-root
 precedence is `--runtime-root`, `DCOMP_RUNTIME_ROOT`, then `<state-root>/run`.
+The runtime filesystem must support Unix-domain socket files and hard links
+within a system's runtime tree; the proxy uses private hard-link anchors for
+identity-safe retry and crash cleanup.
 The cleaned absolute state-root path also selects the Docker resource
 namespace used in physical container, egress-network, and named-volume names
 and ownership labels. Consequently, two state roots can use the same system
@@ -233,9 +236,12 @@ dcomp [GLOBAL_OPTIONS] abort NAME
 
 Stop a pending operation using verified observed state. For an apply, abort
 removes only target resources that were not part of the previous committed
-deployment. It is not rollback: resources already retired are repaired only by
-a later `up`. An operation with unresolved create results must be resumed far
-enough to resolve them before it can be aborted.
+deployment, then reverse-resyncs a retained proxy to the previous wiring. It is
+not rollback in the general case because resources already retired may be
+gone. If reverse resync transiently cannot converge, abort takes the full-
+replacement path and recreates the previous fleet. Proxy identity or protocol
+mismatches are terminal. An operation with unresolved create results must be
+resumed far enough to resolve them before it can be aborted.
 
 ### `inspect-image`
 
