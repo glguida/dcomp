@@ -116,8 +116,10 @@ different live proxy in the same runtime directory is never replaced.
 Resume dispatches by observed digest. The previous digest is resynced again;
 the target digest continues with create; a non-converged or unexpected digest
 is retried and then identity-verified shutdown falls back to full replacement.
-A dead proxy takes the same full-replacement path. That fallback removes every
-socket-mounted target container before publishing replacement sockets.
+A dead proxy takes the same full-replacement path. That fallback removes the
+complete component fleet, including components without endpoints, before
+publishing replacement sockets. Networks are reconciled separately and named
+volumes survive.
 Process-identity, proxy-format, and control-protocol mismatches are terminal;
 they never enter replacement fallback.
 

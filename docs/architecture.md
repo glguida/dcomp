@@ -172,7 +172,8 @@ resync the live proxy: unchanged endpoint identities keep their socket inodes,
 surviving links keep established streams, and only removed links are cut.
 Changing a component's own endpoint set first retires that component, so no
 container mounts a path when the proxy publishes its new listener. A runtime-
-root change still replaces the complete proxy and socket-mounted fleet.
+root change still replaces the complete proxy and component fleet, including
+components without endpoints.
 
 `down` verifies recorded ownership, stops/removes component containers first,
 stops the proxy second, then removes transient egress networks. Named volumes

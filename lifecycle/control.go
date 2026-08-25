@@ -479,7 +479,7 @@ func (controller *Controller) restorePreviousProxyDuringAbort(
 		}
 	}
 	if err := controller.removeContainersWithStaleProxyMounts(ctx, operation); err != nil {
-		return fmt.Errorf("remove socket-mounted containers during abort fallback: %w", err)
+		return fmt.Errorf("remove component fleet during abort fallback: %w", err)
 	}
 	return nil
 }

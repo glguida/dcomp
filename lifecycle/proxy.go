@@ -94,8 +94,8 @@ func (controller *Controller) ensureTargetProxy(
 	}
 
 	// The process was identity-verified by Inspect. Stop that exact process,
-	// remove every container that pins one of its sockets, then use the
-	// established full-replacement path.
+	// remove the complete component fleet, then use the established
+	// full-replacement path.
 	if err := controller.replaceTargetProxy(ctx, operation); err != nil {
 		return errors.Join(fmt.Errorf("proxy could not converge: %w", lastErr), err)
 	}
@@ -160,7 +160,7 @@ func (controller *Controller) replaceTargetProxy(
 		return err
 	}
 	controller.report(
-		"replacing proxy and socket-mounted components for %s",
+		"replacing proxy and component fleet for %s",
 		operation.Target.Name,
 	)
 	return controller.startTargetProxy(ctx, operation)
@@ -177,8 +177,9 @@ func applyPhaseUsesProxy(phase string) bool {
 
 // recoverMissingTargetProxy returns a post-proxy apply to proxy setup. Unix
 // socket bind mounts retain the inode that existed when Docker created the
-// container, so every target container must be recreated before a replacement
-// proxy can safely publish new sockets at the same paths.
+// container. The fallback deliberately recreates the complete component fleet,
+// including components without endpoints, before a replacement proxy publishes
+// new sockets.
 func (controller *Controller) recoverMissingTargetProxy(
 	ctx context.Context,
 	operation *state.Operation,
@@ -217,7 +218,7 @@ func (controller *Controller) recoverMissingTargetProxy(
 	if err := controller.setPhase(operation, phaseResync); err != nil {
 		return false, err
 	}
-	controller.report("replacing missing proxy and socket-mounted components for %s", operation.Target.Name)
+	controller.report("replacing missing proxy and component fleet for %s", operation.Target.Name)
 	return true, nil
 }
 
