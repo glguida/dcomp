@@ -70,6 +70,18 @@ func (manager *fakeProxyManager) Inspect(_ context.Context, process proxy.Proces
 	}, nil
 }
 
+// Resync is unused by the pre-resync lifecycle. It keeps this test double
+// compatible with the proxy manager interface while lifecycle integration is
+// introduced in the following commit.
+func (manager *fakeProxyManager) Resync(
+	_ context.Context,
+	_ proxy.Process,
+	_ proxy.Wiring,
+	_ string,
+) (proxy.Status, error) {
+	return proxy.Status{}, fmt.Errorf("fake proxy resync is not implemented")
+}
+
 func (manager *fakeProxyManager) Stop(_ context.Context, process proxy.Process) error {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()

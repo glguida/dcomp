@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -46,6 +45,7 @@ type LogLine struct {
 type Manager interface {
 	Ensure(context.Context, Config) (Process, error)
 	Inspect(context.Context, Process) (Status, error)
+	Resync(context.Context, Process, Wiring, string) (Status, error)
 	Stop(context.Context, Process) error
 	Logs(context.Context, Process, bool, func(LogLine) error) error
 }
@@ -67,6 +67,12 @@ func (manager *ProcessManager) Ensure(ctx context.Context, config Config) (Proce
 	}
 	expected := processForConfig(config, 0)
 	if status, err := manager.Inspect(ctx, expected); err == nil {
+		if !status.Ready || status.Digest != config.Digest {
+			return Process{}, fmt.Errorf(
+				"proxy instance %s is live with wiring %q, expected %q",
+				config.InstanceID, status.Digest, config.Digest,
+			)
+		}
 		return processForConfig(config, status.PID), nil
 	} else if !errors.Is(err, ErrNotRunning) && !errors.Is(err, ErrIdentityMismatch) {
 		return Process{}, fmt.Errorf("inspect existing proxy: %w", err)
@@ -115,8 +121,15 @@ func (manager *ProcessManager) Ensure(ctx context.Context, config Config) (Proce
 		return Process{}, fmt.Errorf("inspect proxy control socket: %w", dialErr)
 	}
 	if staleProcess != nil {
-		if err := cleanupRuntime(*staleProcess); err != nil {
-			return Process{}, fmt.Errorf("clean stale proxy runtime: %w", err)
+		finished, cleanupErr := finishStoppedProxyCleanup(*staleProcess, true)
+		if cleanupErr != nil {
+			return Process{}, fmt.Errorf("reclaim stale proxy runtime: %w", cleanupErr)
+		}
+		if !finished {
+			return Process{}, fmt.Errorf(
+				"proxy control is unavailable while recorded PID %d is still running; refusing runtime cleanup",
+				staleProcess.PID,
+			)
 		}
 	}
 
@@ -203,6 +216,15 @@ func (manager *ProcessManager) Ensure(ctx context.Context, config Config) (Proce
 			fmt.Errorf("started dcomp-proxy reported PID %d, expected %d", status.PID, process.PID),
 		)
 	}
+	if !status.Ready || status.Digest != config.Digest {
+		return Process{}, abortStartedCommand(
+			command,
+			fmt.Errorf(
+				"started dcomp-proxy reported ready=%t digest=%q, expected %q",
+				status.Ready, status.Digest, config.Digest,
+			),
+		)
+	}
 	if err := command.Process.Release(); err != nil {
 		return Process{}, abortStartedCommand(
 			command,
@@ -286,21 +308,84 @@ func (manager *ProcessManager) Inspect(ctx context.Context, process Process) (St
 		deadline = contextDeadline
 	}
 	_ = connection.SetDeadline(deadline)
-	if err := json.NewEncoder(connection).Encode(ControlRequest{
+	if err := writeControlMessage(connection, ControlRequest{
 		Command: "status", InstanceID: process.InstanceID,
+		ProtocolVersion: ControlProtocolVersion,
 	}); err != nil {
 		return Status{}, err
 	}
 	var status Status
-	decoder := json.NewDecoder(io.LimitReader(connection, maxControlMessage))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&status); err != nil {
+	if err := readControlMessage(connection, &status); err != nil {
 		return Status{}, err
 	}
-	if err := verifyStatus(process, status); err != nil {
+	if err := verifyStatusIdentity(process, status); err != nil {
 		return Status{}, err
+	}
+	if status.Error != "" {
+		return Status{}, fmt.Errorf("proxy control error: %s", status.Error)
 	}
 	return status, nil
+}
+
+// Resync asks one identity-verified proxy process using the current control
+// protocol to converge to a complete target Wiring.
+func (manager *ProcessManager) Resync(
+	ctx context.Context,
+	process Process,
+	wiring Wiring,
+	digest string,
+) (Status, error) {
+	if err := validateProcess(process, false); err != nil {
+		return Status{}, err
+	}
+	computed, err := wiring.Digest()
+	if err != nil {
+		return Status{}, err
+	}
+	if digest != computed {
+		return Status{}, fmt.Errorf(
+			"target wiring digest mismatch: expected %s, found %s",
+			computed, digest,
+		)
+	}
+	_, err = manager.Inspect(ctx, process)
+	if err != nil {
+		return Status{}, err
+	}
+	connection, err := (&net.Dialer{Timeout: 2 * time.Second}).DialContext(
+		ctx, "unix", process.Control,
+	)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED) {
+			return Status{}, ErrNotRunning
+		}
+		return Status{}, err
+	}
+	defer connection.Close()
+	deadline := time.Now().Add(controlRequestTimeout)
+	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	_ = connection.SetDeadline(deadline)
+	if err := writeControlMessage(connection, ControlRequest{
+		Command: "resync", InstanceID: process.InstanceID,
+		ProtocolVersion: ControlProtocolVersion,
+		Wiring:          &wiring,
+		Digest:          digest,
+	}); err != nil {
+		return Status{}, err
+	}
+	var response Status
+	if err := readControlMessage(connection, &response); err != nil {
+		return Status{}, err
+	}
+	if err := verifyStatusIdentity(process, response); err != nil {
+		return response, err
+	}
+	if response.Error != "" {
+		return response, fmt.Errorf("proxy resync failed: %s", response.Error)
+	}
+	return response, nil
 }
 
 func (manager *ProcessManager) Stop(ctx context.Context, process Process) error {
@@ -309,7 +394,21 @@ func (manager *ProcessManager) Stop(ctx context.Context, process Process) error 
 	}
 	status, err := manager.Inspect(ctx, process)
 	if errors.Is(err, ErrNotRunning) {
-		return cleanupRuntime(process)
+		markerReliable, markerErr := cleanupCompletionMarkerSupported(process)
+		if markerErr != nil {
+			return markerErr
+		}
+		finished, cleanupErr := finishStoppedProxyCleanup(process, markerReliable)
+		if cleanupErr != nil {
+			return cleanupErr
+		}
+		if finished {
+			return nil
+		}
+		return fmt.Errorf(
+			"proxy control is unavailable while recorded PID %d is still running; refusing runtime cleanup",
+			process.PID,
+		)
 	}
 	if err != nil {
 		return err
@@ -319,20 +418,24 @@ func (manager *ProcessManager) Stop(ctx context.Context, process Process) error 
 		return err
 	}
 	_ = connection.SetDeadline(time.Now().Add(3 * time.Second))
-	if err := json.NewEncoder(connection).Encode(ControlRequest{
+	if err := writeControlMessage(connection, ControlRequest{
 		Command: "shutdown", InstanceID: process.InstanceID,
+		ProtocolVersion: ControlProtocolVersion,
 	}); err != nil {
 		_ = connection.Close()
 		return err
 	}
 	var response Status
-	err = json.NewDecoder(io.LimitReader(connection, maxControlMessage)).Decode(&response)
+	err = readControlMessage(connection, &response)
 	_ = connection.Close()
 	if err != nil {
 		return err
 	}
-	if err := verifyStatus(process, response); err != nil {
+	if err := verifyStatusIdentity(process, response); err != nil {
 		return err
+	}
+	if response.Error != "" {
+		return fmt.Errorf("proxy control error: %s", response.Error)
 	}
 
 	timeout := manager.StopTimeout
@@ -346,7 +449,13 @@ func (manager *ProcessManager) Stop(ctx context.Context, process Process) error 
 	for {
 		_, inspectErr := manager.Inspect(stopCtx, process)
 		if errors.Is(inspectErr, ErrNotRunning) {
-			return cleanupRuntime(process)
+			finished, cleanupErr := finishStoppedProxyCleanup(process, true)
+			if cleanupErr != nil {
+				return cleanupErr
+			}
+			if finished {
+				return nil
+			}
 		}
 		if errors.Is(inspectErr, ErrIdentityMismatch) && stopCtx.Err() == nil {
 			return inspectErr
@@ -357,6 +466,13 @@ func (manager *ProcessManager) Stop(ctx context.Context, process Process) error 
 		// until the socket is gone or the bounded stop context expires.
 		select {
 		case <-stopCtx.Done():
+			finished, cleanupErr := finishStoppedProxyCleanup(process, true)
+			if cleanupErr != nil {
+				return cleanupErr
+			}
+			if finished {
+				return nil
+			}
 			// The instance was verified immediately before shutdown. Signal only
 			// that exact PID as a bounded fallback, then leave state for resume.
 			if status.PID == process.PID {
@@ -368,6 +484,58 @@ func (manager *ProcessManager) Stop(ctx context.Context, process Process) error 
 		case <-ticker.C:
 		}
 	}
+}
+
+func cleanupCompletionMarkerSupported(process Process) (bool, error) {
+	data, err := os.ReadFile(filepath.Join(process.RuntimeDir, ConfigFileName))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	config, err := LoadConfig(data)
+	if err != nil {
+		return false, err
+	}
+	if config.InstanceID != process.InstanceID || config.RuntimeDir != process.RuntimeDir {
+		return false, fmt.Errorf("%w: runtime config does not match recorded process", ErrIdentityMismatch)
+	}
+	return true, nil
+}
+
+// finishStoppedProxyCleanup distinguishes an unavailable control socket from
+// completed process cleanup. Current proxies remove their PID marker only
+// after every owned socket path. Without a current config proving that marker
+// contract, the recorded process must exit before cleanup.
+func finishStoppedProxyCleanup(process Process, markerReliable bool) (bool, error) {
+	pidPath := filepath.Join(process.RuntimeDir, PIDFileName)
+	_, markerErr := os.Lstat(pidPath)
+	if markerErr != nil && !errors.Is(markerErr, os.ErrNotExist) {
+		return false, fmt.Errorf("inspect proxy cleanup marker: %w", markerErr)
+	}
+	if errors.Is(markerErr, os.ErrNotExist) && markerReliable {
+		if err := cleanupCompletedRuntime(process); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if process.PID <= 0 {
+		return false, fmt.Errorf(
+			"proxy cleanup cannot be verified because its recorded PID is unavailable",
+		)
+	}
+	killErr := syscall.Kill(process.PID, 0)
+	if killErr == nil || errors.Is(killErr, syscall.EPERM) {
+		return false, nil
+	}
+	if !errors.Is(killErr, syscall.ESRCH) {
+		return false, fmt.Errorf("inspect recorded proxy PID %d: %w", process.PID, killErr)
+	}
+	if err := cleanupCrashedRuntime(process); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (manager *ProcessManager) Logs(
@@ -446,7 +614,7 @@ func processForConfig(config Config, pid int) Process {
 }
 
 func validateProcess(process Process, requirePID bool) error {
-	if process.InstanceID == "" || process.Digest == "" {
+	if process.InstanceID == "" {
 		return fmt.Errorf("proxy process identity is incomplete")
 	}
 	if requirePID && process.PID <= 0 {
@@ -462,29 +630,30 @@ func validateProcess(process Process, requirePID bool) error {
 	return nil
 }
 
-func verifyStatus(process Process, status Status) error {
+func verifyStatusIdentity(process Process, status Status) error {
 	if status.Error != "" {
 		if strings.Contains(status.Error, "instance ID mismatch") {
 			return fmt.Errorf("%w: %s", ErrIdentityMismatch, status.Error)
 		}
-		return fmt.Errorf("proxy control error: %s", status.Error)
 	}
-	// Status version 1 is the deployed 0.2 proxy protocol. Version 2 adds only
-	// optional per-link metrics, so a newer orchestrator can still identify and
-	// gracefully stop a recorded v1 process while replacing it.
-	if status.Version < 1 || status.Version > ConfigVersion {
+	if status.Version != ConfigVersion {
 		return fmt.Errorf("unsupported proxy status version %d", status.Version)
 	}
-	if status.InstanceID != process.InstanceID || status.Digest != process.Digest {
+	if status.InstanceID != process.InstanceID {
 		return fmt.Errorf("%w: status does not match its recorded identity", ErrIdentityMismatch)
-	}
-	if !status.Ready {
-		return fmt.Errorf("proxy is not ready")
 	}
 	if process.PID > 0 && status.PID != process.PID {
 		return fmt.Errorf(
 			"%w: proxy PID changed: expected %d, found %d",
 			ErrIdentityMismatch, process.PID, status.PID,
+		)
+	}
+	if status.ControlProtocolVersion != ControlProtocolVersion {
+		return fmt.Errorf(
+			"%w: expected %d, found %d",
+			ErrControlProtocolMismatch,
+			ControlProtocolVersion,
+			status.ControlProtocolVersion,
 		)
 	}
 	return nil
@@ -514,95 +683,165 @@ func (manager *ProcessManager) binaryPath() (string, error) {
 	return candidate, nil
 }
 
-func cleanupRuntime(process Process) error {
+func cleanupCrashedRuntime(process Process) error {
 	if err := validateProcess(process, false); err != nil {
 		return err
 	}
-	var config *Config
 	configPath := filepath.Join(process.RuntimeDir, ConfigFileName)
 	if data, err := os.ReadFile(configPath); err == nil {
 		loaded, loadErr := LoadConfig(data)
 		if loadErr != nil {
 			return loadErr
 		}
-		if loaded.InstanceID != process.InstanceID || loaded.Digest != process.Digest ||
-			loaded.RuntimeDir != process.RuntimeDir {
+		if loaded.InstanceID != process.InstanceID || loaded.RuntimeDir != process.RuntimeDir {
 			return fmt.Errorf("%w: runtime config does not match recorded process", ErrIdentityMismatch)
 		}
-		config = &loaded
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	known := []string{
-		process.Control,
-		controlSocketFile(process.RuntimeDir),
-		filepath.Join(process.RuntimeDir, PIDFileName),
-		filepath.Join(process.RuntimeDir, ReadyFileName),
-		configPath,
+
+	// Load and validate the complete ownership ledger before removing anything.
+	// Config describes wiring and is never treated as pathname ownership.
+	ownershipPath := filepath.Join(process.RuntimeDir, socketOwnershipFileName)
+	var ownership *socketOwnershipLedger
+	if _, err := os.Lstat(ownershipPath); err == nil {
+		loaded, loadErr := loadSocketOwnershipLedger(
+			ownershipPath, process.RuntimeDir, process.InstanceID,
+		)
+		if loadErr != nil {
+			return fmt.Errorf("load socket ownership ledger: %w", loadErr)
+		}
+		ownership = loaded
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
-	shortRoots := make(map[string]struct{})
-	if process.Control != controlSocketFile(process.RuntimeDir) {
-		shortRoots[filepath.Dir(process.Control)] = struct{}{}
+	shortRoots := ownership.ShortRoots()
+	var temporaryFiles []string
+	entries, err := os.ReadDir(process.RuntimeDir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
-	if config != nil {
-		for _, endpoint := range config.Endpoints {
-			actual := socketListenPath(endpoint.Socket)
-			known = append(known, endpoint.Socket, actual)
-			if actual != endpoint.Socket {
-				shortRoots[filepath.Dir(actual)] = struct{}{}
+	for _, entry := range entries {
+		name := entry.Name()
+		path := filepath.Join(process.RuntimeDir, name)
+		if strings.HasPrefix(name, ".proxy-tmp-") {
+			if entry.IsDir() {
+				return fmt.Errorf("refusing to remove unexpected proxy temporary directory %s", path)
 			}
+			temporaryFiles = append(temporaryFiles, path)
 		}
 	}
-	sort.Strings(known)
-	for index, path := range known {
-		if index != 0 && path == known[index-1] {
-			continue
+
+	// Only ledger claims are socket-cleanup candidates. Other endpoint entries
+	// are foreign regardless of file type and are preserved; the separately
+	// reserved .proxy-tmp-* namespace contains interrupted atomic metadata
+	// writes. The ledger remains present on partial socket cleanup, and
+	// proxy.json/proxy.pid remain until every ownership claim has been resolved.
+	if ownership != nil {
+		if err := ownership.CleanupAll(); err != nil {
+			return err
 		}
+		if err := ownership.Close(); err != nil {
+			return err
+		}
+	}
+	for _, path := range temporaryFiles {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
+	}
+	if err := os.Remove(filepath.Join(process.RuntimeDir, ReadyFileName)); err != nil &&
+		!errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 	for _, directory := range []string{"in", "out"} {
 		path := filepath.Join(process.RuntimeDir, directory)
-		entries, err := os.ReadDir(path)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		for _, entry := range entries {
-			info, err := entry.Info()
-			if err != nil {
-				return err
-			}
-			if info.Mode()&os.ModeSocket == 0 {
-				return fmt.Errorf("refusing to remove unexpected proxy runtime entry %s", filepath.Join(path, entry.Name()))
-			}
-			if err := os.Remove(filepath.Join(path, entry.Name())); err != nil {
-				return err
-			}
-		}
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
+			if !errors.Is(err, syscall.ENOTEMPTY) {
+				return err
+			}
 		}
 	}
 	if err := os.Remove(process.Log); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if err := os.Remove(process.RuntimeDir); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	var roots []string
-	for root := range shortRoots {
-		roots = append(roots, root)
-	}
-	sort.Sort(sort.Reverse(sort.StringSlice(roots)))
-	for _, root := range roots {
+	for _, root := range shortRoots {
 		if err := os.Remove(root); err != nil &&
 			!errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTEMPTY) {
 			return err
 		}
+	}
+	// PID is removed before config: its absence declares socket cleanup
+	// complete, while the still-present config lets a retry validate identity.
+	if err := os.Remove(filepath.Join(process.RuntimeDir, PIDFileName)); err != nil &&
+		!errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.Remove(configPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.Remove(process.RuntimeDir); err != nil &&
+		!errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTEMPTY) {
+		return err
+	}
+	return nil
+}
+
+// cleanupCompletedRuntime runs only after a current proxy has removed its PID
+// completion marker. It removes manager-owned metadata and empty directories,
+// but deliberately performs no socket cleanup: every socket pathname has
+// already been removed or relinquished by the process that held the ledger.
+func cleanupCompletedRuntime(process Process) error {
+	if err := validateProcess(process, false); err != nil {
+		return err
+	}
+	configPath := filepath.Join(process.RuntimeDir, ConfigFileName)
+	if data, err := os.ReadFile(configPath); err == nil {
+		config, loadErr := LoadConfig(data)
+		if loadErr != nil {
+			return loadErr
+		}
+		if config.InstanceID != process.InstanceID || config.RuntimeDir != process.RuntimeDir {
+			return fmt.Errorf("%w: runtime config does not match recorded process", ErrIdentityMismatch)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	ownershipPath := filepath.Join(process.RuntimeDir, socketOwnershipFileName)
+	if _, err := os.Lstat(ownershipPath); err == nil {
+		ownership, loadErr := loadSocketOwnershipLedger(
+			ownershipPath, process.RuntimeDir, process.InstanceID,
+		)
+		if loadErr != nil {
+			return fmt.Errorf("load socket ownership ledger after completed cleanup: %w", loadErr)
+		}
+		if len(ownership.records) != 0 {
+			return fmt.Errorf(
+				"proxy PID marker is absent but socket ownership ledger has %d claim(s)",
+				len(ownership.records),
+			)
+		}
+		if err := ownership.Close(); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.Remove(process.Log); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	for _, directory := range []string{"in", "out"} {
+		if err := os.Remove(filepath.Join(process.RuntimeDir, directory)); err != nil &&
+			!errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTEMPTY) {
+			return err
+		}
+	}
+	if err := os.Remove(configPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.Remove(process.RuntimeDir); err != nil &&
+		!errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTEMPTY) {
+		return err
 	}
 	return nil
 }

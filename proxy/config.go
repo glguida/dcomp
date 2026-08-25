@@ -1,4 +1,4 @@
-// Package proxy implements the per-system DComp 0.2 data-plane proxy and
+// Package proxy implements the per-system DComp 0.2.1 data-plane proxy and
 // the host process used to manage it.
 package proxy
 
@@ -55,12 +55,29 @@ type Endpoint struct {
 	Socket    string    `json:"socket"`
 }
 
+// EndpointIdentity is the filesystem-independent identity of one endpoint.
+// Its host socket path is derived only after a Wiring is attached to a fixed
+// proxy runtime directory.
+type EndpointIdentity struct {
+	Component string    `json:"component"`
+	Name      string    `json:"name"`
+	Direction Direction `json:"direction"`
+}
+
 // Link routes one input socket to one output socket.
 type Link struct {
 	InputComponent  string `json:"input_component"`
 	InputEndpoint   string `json:"input_endpoint"`
 	OutputComponent string `json:"output_component"`
 	OutputEndpoint  string `json:"output_endpoint"`
+}
+
+// Wiring is the canonical, process-independent data-plane content served by a
+// proxy. Its digest excludes process identity, system name, runtime paths, and
+// schema versions.
+type Wiring struct {
+	Endpoints []EndpointIdentity `json:"endpoints"`
+	Links     []Link             `json:"links"`
 }
 
 // Config is the complete immutable wiring consumed by dcomp-proxy. InstanceID
@@ -97,36 +114,23 @@ func NewConfig(
 		return Config{}, fmt.Errorf("proxy runtime directory must be an absolute clean path")
 	}
 
+	wiring, err := NewWiring(spec)
+	if err != nil {
+		return Config{}, err
+	}
 	config := Config{
 		Version: ConfigVersion, System: spec.Name, InstanceID: instanceID,
 		RuntimeDir: absolute,
 	}
-	for _, component := range spec.Components {
-		for _, endpoint := range component.Definition.Inputs {
-			config.Endpoints = append(config.Endpoints, Endpoint{
-				Component: component.Name,
-				Name:      endpoint.Name,
-				Direction: DirectionInput,
-				Socket:    HostSocket(absolute, DirectionInput, component.Name, endpoint.Name),
-			})
-		}
-		for _, endpoint := range component.Definition.Outputs {
-			config.Endpoints = append(config.Endpoints, Endpoint{
-				Component: component.Name,
-				Name:      endpoint.Name,
-				Direction: DirectionOutput,
-				Socket:    HostSocket(absolute, DirectionOutput, component.Name, endpoint.Name),
-			})
-		}
-	}
-	for _, link := range spec.Links {
-		config.Links = append(config.Links, Link{
-			InputComponent:  link.Input.Component,
-			InputEndpoint:   link.Input.Endpoint,
-			OutputComponent: link.Output.Component,
-			OutputEndpoint:  link.Output.Endpoint,
+	for _, endpoint := range wiring.Endpoints {
+		config.Endpoints = append(config.Endpoints, Endpoint{
+			Component: endpoint.Component,
+			Name:      endpoint.Name,
+			Direction: endpoint.Direction,
+			Socket:    HostSocket(absolute, endpoint.Direction, endpoint.Component, endpoint.Name),
 		})
 	}
+	config.Links = append(config.Links, wiring.Links...)
 	config.canonicalize()
 	digest, err := config.computeDigest()
 	if err != nil {
@@ -137,6 +141,38 @@ func NewConfig(
 		return Config{}, err
 	}
 	return config, nil
+}
+
+// NewWiring derives the complete canonical data-plane wiring from a resolved
+// system without including any process or host-path identity.
+func NewWiring(spec composition.ResolvedSpec) (Wiring, error) {
+	wiring := Wiring{
+		Endpoints: make([]EndpointIdentity, 0),
+		Links:     make([]Link, 0, len(spec.Links)),
+	}
+	for _, component := range spec.Components {
+		for _, endpoint := range component.Definition.Inputs {
+			wiring.Endpoints = append(wiring.Endpoints, EndpointIdentity{
+				Component: component.Name, Name: endpoint.Name, Direction: DirectionInput,
+			})
+		}
+		for _, endpoint := range component.Definition.Outputs {
+			wiring.Endpoints = append(wiring.Endpoints, EndpointIdentity{
+				Component: component.Name, Name: endpoint.Name, Direction: DirectionOutput,
+			})
+		}
+	}
+	for _, link := range spec.Links {
+		wiring.Links = append(wiring.Links, Link{
+			InputComponent: link.Input.Component, InputEndpoint: link.Input.Endpoint,
+			OutputComponent: link.Output.Component, OutputEndpoint: link.Output.Endpoint,
+		})
+	}
+	wiring.canonicalize()
+	if err := wiring.Validate(); err != nil {
+		return Wiring{}, err
+	}
+	return wiring, nil
 }
 
 // LoadConfig decodes a strict proxy configuration.
@@ -159,11 +195,7 @@ func LoadConfig(data []byte) (Config, error) {
 }
 
 func (config Config) Validate() error {
-	// Version 2 changes only the proxy status surface. The wiring schema is
-	// unchanged, so version-1 files remain readable for verified cleanup and
-	// upgrade recovery. New configurations are always emitted at the current
-	// version.
-	if config.Version < 1 || config.Version > ConfigVersion {
+	if config.Version != ConfigVersion {
 		return fmt.Errorf("unsupported proxy config version %d", config.Version)
 	}
 	if !composition.ValidName(config.System) {
@@ -195,10 +227,59 @@ func (config Config) Validate() error {
 		endpoints[key] = endpoint
 	}
 
-	linkedInputs := make(map[string]struct{}, len(config.Links))
-	for _, link := range config.Links {
-		inputKey := endpointKey(DirectionInput, link.InputComponent, link.InputEndpoint)
-		outputKey := endpointKey(DirectionOutput, link.OutputComponent, link.OutputEndpoint)
+	if err := config.Wiring().Validate(); err != nil {
+		return err
+	}
+
+	digest, err := config.computeDigest()
+	if err != nil {
+		return err
+	}
+	if config.Digest != digest {
+		return fmt.Errorf("proxy config digest mismatch: expected %s, found %s", digest, config.Digest)
+	}
+	return nil
+}
+
+// Wiring returns the path-independent content carried by a Config.
+func (config Config) Wiring() Wiring {
+	wiring := Wiring{
+		Endpoints: make([]EndpointIdentity, 0, len(config.Endpoints)),
+		Links:     append([]Link(nil), config.Links...),
+	}
+	for _, endpoint := range config.Endpoints {
+		wiring.Endpoints = append(wiring.Endpoints, EndpointIdentity{
+			Component: endpoint.Component, Name: endpoint.Name, Direction: endpoint.Direction,
+		})
+	}
+	wiring.canonicalize()
+	return wiring
+}
+
+// Validate verifies that Wiring is a complete direct-link graph. Every input
+// is linked exactly once; outputs may be unused or shared by many inputs.
+func (wiring Wiring) Validate() error {
+	endpoints := make(map[string]EndpointIdentity, len(wiring.Endpoints))
+	for _, endpoint := range wiring.Endpoints {
+		if !composition.ValidName(endpoint.Component) || !composition.ValidName(endpoint.Name) {
+			return fmt.Errorf("invalid proxy endpoint %q.%q", endpoint.Component, endpoint.Name)
+		}
+		if endpoint.Direction != DirectionInput && endpoint.Direction != DirectionOutput {
+			return fmt.Errorf(
+				"invalid direction %q for %s.%s",
+				endpoint.Direction, endpoint.Component, endpoint.Name,
+			)
+		}
+		key := endpointIdentityKey(endpoint)
+		if _, exists := endpoints[key]; exists {
+			return fmt.Errorf("proxy endpoint %s is declared more than once", key)
+		}
+		endpoints[key] = endpoint
+	}
+	linkedInputs := make(map[string]struct{}, len(wiring.Links))
+	for _, link := range wiring.Links {
+		inputKey := linkInputKey(link)
+		outputKey := linkOutputKey(link)
 		if _, exists := endpoints[inputKey]; !exists {
 			return fmt.Errorf("proxy link names unknown input %s", inputKey)
 		}
@@ -211,22 +292,48 @@ func (config Config) Validate() error {
 		linkedInputs[inputKey] = struct{}{}
 	}
 	for key, endpoint := range endpoints {
-		if endpoint.Direction != DirectionInput {
-			continue
+		if endpoint.Direction == DirectionInput {
+			if _, exists := linkedInputs[key]; !exists {
+				return fmt.Errorf("proxy input %s is not linked", key)
+			}
 		}
-		if _, exists := linkedInputs[key]; !exists {
-			return fmt.Errorf("proxy input %s is not linked", key)
-		}
-	}
-
-	digest, err := config.computeDigest()
-	if err != nil {
-		return err
-	}
-	if config.Digest != digest {
-		return fmt.Errorf("proxy config digest mismatch: expected %s, found %s", digest, config.Digest)
 	}
 	return nil
+}
+
+// Digest returns SHA-256 over only the canonical endpoint and link sets.
+func (wiring Wiring) Digest() (string, error) {
+	copy := wiring
+	copy.Endpoints = append([]EndpointIdentity(nil), wiring.Endpoints...)
+	copy.Links = append([]Link(nil), wiring.Links...)
+	copy.canonicalize()
+	if err := copy.Validate(); err != nil {
+		return "", err
+	}
+	encoded, err := json.Marshal(copy)
+	if err != nil {
+		return "", fmt.Errorf("encode proxy wiring: %w", err)
+	}
+	return digestBytes(encoded), nil
+}
+
+func (wiring *Wiring) canonicalize() {
+	if wiring.Endpoints == nil {
+		wiring.Endpoints = make([]EndpointIdentity, 0)
+	}
+	if wiring.Links == nil {
+		wiring.Links = make([]Link, 0)
+	}
+	sort.Slice(wiring.Endpoints, func(i, j int) bool {
+		return endpointIdentityKey(wiring.Endpoints[i]) < endpointIdentityKey(wiring.Endpoints[j])
+	})
+	sort.Slice(wiring.Links, func(i, j int) bool {
+		leftInput, rightInput := linkInputKey(wiring.Links[i]), linkInputKey(wiring.Links[j])
+		if leftInput != rightInput {
+			return leftInput < rightInput
+		}
+		return linkOutputKey(wiring.Links[i]) < linkOutputKey(wiring.Links[j])
+	})
 }
 
 func (config *Config) canonicalize() {
@@ -248,16 +355,12 @@ func (config *Config) canonicalize() {
 }
 
 func (config Config) computeDigest() (string, error) {
-	copy := config
-	copy.InstanceID = ""
-	copy.Digest = ""
-	copy.canonicalize()
-	encoded, err := json.Marshal(copy)
-	if err != nil {
-		return "", fmt.Errorf("encode proxy identity: %w", err)
-	}
+	return config.Wiring().Digest()
+}
+
+func digestBytes(encoded []byte) string {
 	sum := sha256.Sum256(encoded)
-	return "sha256:" + hex.EncodeToString(sum[:]), nil
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func HostSocket(runtimeDir string, direction Direction, component, endpoint string) string {
@@ -280,6 +383,14 @@ func socketListenPath(exposedPath string) string {
 	if len(exposedPath) < 104 {
 		return exposedPath
 	}
+	return shortenedSocketPath(exposedPath)
+}
+
+// shortenedSocketPath returns the hidden same-filesystem socket path even for
+// an exposed path that would itself fit the kernel limit. Publication uses
+// this when there is room for the final path but not for a temporary bind name
+// in the same directory.
+func shortenedSocketPath(exposedPath string) string {
 	sum := sha256.Sum256([]byte(exposedPath))
 	directory := filepath.Dir(exposedPath)
 	// Endpoint sockets are one directory below the per-system runtime
@@ -309,4 +420,20 @@ func socketListenPath(exposedPath string) string {
 
 func endpointKey(direction Direction, component, endpoint string) string {
 	return string(direction) + "/" + component + "/" + endpoint
+}
+
+func endpointIdentityKey(endpoint EndpointIdentity) string {
+	return endpointKey(endpoint.Direction, endpoint.Component, endpoint.Name)
+}
+
+func linkInputKey(link Link) string {
+	return endpointKey(DirectionInput, link.InputComponent, link.InputEndpoint)
+}
+
+func linkOutputKey(link Link) string {
+	return endpointKey(DirectionOutput, link.OutputComponent, link.OutputEndpoint)
+}
+
+func linkKey(link Link) string {
+	return linkInputKey(link) + "\x00" + linkOutputKey(link)
 }
