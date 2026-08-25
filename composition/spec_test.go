@@ -614,7 +614,7 @@ func TestComponentDigestCoversImageDefinitionAndRuntime(t *testing.T) {
 	}
 }
 
-func TestComponentDigestTracksInboundTargetButNotOutgoingLinks(t *testing.T) {
+func TestComponentDigestExcludesLinkTargets(t *testing.T) {
 	const service = "acme.v1.Service"
 	components := []Instance{
 		{
@@ -670,14 +670,10 @@ func TestComponentDigestTracksInboundTargetButNotOutgoingLinks(t *testing.T) {
 	if firstResolved.Digest == secondResolved.Digest {
 		t.Fatal("changed link did not change full system digest")
 	}
-	if resolvedComponent(t, firstResolved, "consumer").Digest ==
-		resolvedComponent(t, secondResolved, "consumer").Digest {
-		t.Fatal("changed inbound target component did not change consumer digest")
-	}
-	for _, provider := range []string{"provider-a", "provider-b"} {
-		if resolvedComponent(t, firstResolved, provider).Digest !=
-			resolvedComponent(t, secondResolved, provider).Digest {
-			t.Fatalf("outgoing link changed %s component digest", provider)
+	for _, name := range []string{"consumer", "provider-a", "provider-b"} {
+		if resolvedComponent(t, firstResolved, name).Digest !=
+			resolvedComponent(t, secondResolved, name).Digest {
+			t.Fatalf("link target changed %s container-definition digest", name)
 		}
 	}
 }

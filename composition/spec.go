@@ -484,44 +484,25 @@ func canonicalizeRuntime(runtime *Runtime) {
 	})
 }
 
-type inboundLinkIdentity struct {
-	Input           string `json:"input"`
-	TargetComponent string `json:"target_component"`
-}
-
-// componentRuntimePolicyVersion changes only when DComp's fixed container
-// launch contract changes. Including it in component identity makes the next
-// `up` replace containers created under an older policy without changing the
-// user-authored component or system grammar.
-const componentRuntimePolicyVersion = 3
+// componentRuntimePolicyVersion domains the fixed container launch contract.
+// Change it whenever that contract or the container-definition identity
+// algorithm changes, so distinct semantics cannot produce interchangeable
+// component identities.
+//
+// Version 4 separates container definition from wiring identity: the component
+// targeted by each input link does not affect the Docker container request.
+const componentRuntimePolicyVersion = 4
 
 func (spec ResolvedSpec) computeComponentDigest(component ResolvedComponent) (string, error) {
 	copy := component
 	copy.ImageRef = ""
 	copy.Digest = ""
-	inbound := make([]inboundLinkIdentity, 0, len(component.Definition.Inputs))
-	for _, link := range spec.Links {
-		if link.Input.Component == component.Name {
-			inbound = append(inbound, inboundLinkIdentity{
-				Input:           link.Input.Endpoint,
-				TargetComponent: link.Output.Component,
-			})
-		}
-	}
-	sort.Slice(inbound, func(i, j int) bool {
-		if inbound[i].Input != inbound[j].Input {
-			return inbound[i].Input < inbound[j].Input
-		}
-		return inbound[i].TargetComponent < inbound[j].TargetComponent
-	})
 	identity := struct {
-		RuntimePolicy int                   `json:"runtime_policy"`
-		Component     ResolvedComponent     `json:"component"`
-		Inbound       []inboundLinkIdentity `json:"inbound,omitempty"`
+		RuntimePolicy int               `json:"runtime_policy"`
+		Component     ResolvedComponent `json:"component"`
 	}{
 		RuntimePolicy: componentRuntimePolicyVersion,
 		Component:     copy,
-		Inbound:       inbound,
 	}
 	encoded, err := json.Marshal(identity)
 	if err != nil {
