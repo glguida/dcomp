@@ -52,9 +52,10 @@ func (controller *Controller) recoverContainerEndpointCleanups(
 	return nil
 }
 
-// recoverRetiredPreviousEndpoints handles operation files written before the
-// endpoint-cleanup journal existed. Only previous containers that are not
-// retained by the target are candidates.
+// recoverRetiredPreviousEndpoints derives cleanup authority when a recorded
+// previous container disappeared out of band before DComp could journal its
+// endpoint. Retention is only a plan, so every previous container is observed;
+// recoverAbsentComponentEndpoint returns immediately while it still exists.
 func (controller *Controller) recoverRetiredPreviousEndpoints(
 	ctx context.Context,
 	operation *state.Operation,
@@ -69,10 +70,6 @@ func (controller *Controller) recoverRetiredPreviousEndpoints(
 		resource, exists := operation.Previous.Containers[component.Name]
 		if !exists {
 			return fmt.Errorf("previous deployment has no %s container", component.Name)
-		}
-		if retained, exists := operation.Containers[component.Name]; exists &&
-			retained.ID == resource.ID && operation.Kind == kindApply {
-			continue
 		}
 		if err := controller.recoverAbsentComponentEndpoint(
 			ctx,
@@ -135,6 +132,35 @@ func (controller *Controller) recoverAbsentComponentEndpoint(
 	return controller.recordEndpointCleanup(
 		operation,
 		newEndpointCleanup(container, plan, network, endpoint),
+	)
+}
+
+// recoverAbsentComponentEndpointCleanup is the removal boundary for a
+// recorded container that is already absent. It preserves the container
+// identity until any orphaned Docker endpoint has been durably recorded and
+// proven absent.
+func (controller *Controller) recoverAbsentComponentEndpointCleanup(
+	ctx context.Context,
+	operation *state.Operation,
+	spec composition.ResolvedSpec,
+	networks map[string]state.Resource,
+	component composition.ResolvedComponent,
+	container state.Resource,
+) error {
+	if err := controller.recoverAbsentComponentEndpoint(
+		ctx,
+		operation,
+		spec,
+		networks,
+		component,
+		container,
+	); err != nil {
+		return err
+	}
+	return controller.recoverContainerEndpointCleanups(
+		ctx,
+		operation,
+		container.ID,
 	)
 }
 

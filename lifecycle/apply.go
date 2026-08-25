@@ -33,10 +33,14 @@ func (controller *Controller) deploymentMatches(
 		deployment.Proxy.RuntimeDir != targetProxy.RuntimeDir {
 		return false, nil
 	}
-	if _, inspectErr := controller.inspectProxy(ctx, *deployment.Proxy); errors.Is(inspectErr, proxy.ErrNotRunning) {
+	status, inspectErr := controller.inspectProxy(ctx, *deployment.Proxy)
+	if errors.Is(inspectErr, proxy.ErrNotRunning) {
 		return false, nil
 	} else if inspectErr != nil {
 		return false, inspectErr
+	}
+	if !status.Ready || status.Digest != targetProxy.Digest {
+		return false, nil
 	}
 	plans, err := resolvedTopology(scope, target)
 	if err != nil {
@@ -154,20 +158,17 @@ func (controller *Controller) selectRetainedResources(
 	retainComponents := false
 	if operation.Previous.Proxy != nil &&
 		operation.Previous.RuntimeRoot == operation.RuntimeRoot {
-		targetConfig, configErr := proxyConfig(
-			operation.Target, operation.RuntimeRoot, operation.Previous.Proxy.InstanceID,
-		)
-		if configErr != nil {
-			return configErr
-		}
-		if operation.Previous.Proxy.Digest == targetConfig.Digest &&
-			operation.Previous.Proxy.RuntimeDir == targetConfig.RuntimeDir {
-			if _, inspectErr := controller.inspectProxy(ctx, *operation.Previous.Proxy); inspectErr == nil {
-				operation.Proxy = cloneProxy(operation.Previous.Proxy)
-				retainComponents = true
-			} else if !errors.Is(inspectErr, proxy.ErrNotRunning) {
-				return inspectErr
-			}
+		// Preserve the durable process identity even when its control socket is
+		// unavailable. Full replacement may still need the recorded PID to prove
+		// that pathname cleanup has completed before a new proxy is launched.
+		operation.Proxy = cloneProxy(operation.Previous.Proxy)
+		if _, inspectErr := controller.inspectProxy(ctx, *operation.Previous.Proxy); inspectErr == nil {
+			// Wiring is mutable observed state. A live, identity-verified proxy
+			// remains the mount owner even when its digest differs from the
+			// target; resync reconciles it after retirement.
+			retainComponents = true
+		} else if !errors.Is(inspectErr, proxy.ErrNotRunning) {
+			return inspectErr
 		}
 	}
 	for _, key := range sortedNetworkKeys(targetPlans) {
@@ -205,6 +206,14 @@ func (controller *Controller) selectRetainedResources(
 		if !exists || previousComponent.Digest != component.Digest {
 			continue
 		}
+		if component.Runtime.ExternalEgress {
+			key := componentNetworkKey(component.Name)
+			retainedNetwork, retained := operation.Networks[key]
+			previousNetwork, recorded := operation.Previous.Networks[key]
+			if !retained || !recorded || retainedNetwork.ID != previousNetwork.ID {
+				continue
+			}
+		}
 		resource, exists := operation.Previous.Containers[component.Name]
 		if !exists {
 			continue
@@ -235,9 +244,6 @@ func (controller *Controller) selectRetainedResources(
 		); err != nil {
 			return err
 		}
-		if !actual.Running {
-			continue
-		}
 		operation.Containers[component.Name] = resource
 	}
 	return nil
@@ -247,8 +253,9 @@ func (controller *Controller) executeApply(
 	ctx context.Context,
 	operation *state.Operation,
 ) error {
-	// This runs before the active phase's strict member preflight so operations
-	// written by the affected state format can recover their own ep-* member.
+	// This runs before the active phase's strict member preflight so a recorded
+	// container that disappeared out of band can have its orphaned ep-* member
+	// recovered before unknown-member validation.
 	if err := controller.recoverRetiredPreviousEndpoints(ctx, operation); err != nil {
 		return fmt.Errorf("recover retired network endpoints: %w", err)
 	}
@@ -262,6 +269,13 @@ func (controller *Controller) executeApply(
 				continue
 			}
 		}
+		recovered, err := controller.recoverMissingApplyPrerequisite(ctx, operation)
+		if err != nil {
+			return err
+		}
+		if recovered {
+			continue
+		}
 		switch operation.Phase {
 		case phaseRetire:
 			if err := controller.retireChangedContainers(ctx, operation); err != nil {
@@ -274,10 +288,10 @@ func (controller *Controller) executeApply(
 			if err := controller.ensureTargetNetworks(ctx, operation); err != nil {
 				return err
 			}
-			if err := controller.setPhase(operation, phaseProxy); err != nil {
+			if err := controller.setPhase(operation, phaseResync); err != nil {
 				return err
 			}
-		case phaseProxy:
+		case phaseResync:
 			if err := controller.ensureTargetProxy(ctx, operation); err != nil {
 				return err
 			}
@@ -306,7 +320,7 @@ func (controller *Controller) executeApply(
 			if err := controller.reconcileAttachments(ctx, operation); err != nil {
 				return err
 			}
-			if err := controller.startNewContainers(ctx, operation); err != nil {
+			if err := controller.ensureTargetContainersRunning(ctx, operation); err != nil {
 				return err
 			}
 			if err := controller.setPhase(operation, phaseCommit); err != nil {
@@ -341,6 +355,319 @@ func (controller *Controller) executeApply(
 			return fmt.Errorf("unknown apply phase %q", operation.Phase)
 		}
 	}
+}
+
+// recoverMissingApplyPrerequisite makes phase advancement conditional on the
+// durable resources produced by earlier phases still existing. A rewind is
+// persisted only after any container tied to a missing network generation has
+// been safely removed, preserving the publication-before-mount ordering.
+func (controller *Controller) recoverMissingApplyPrerequisite(
+	ctx context.Context,
+	operation *state.Operation,
+) (bool, error) {
+	if applyPhaseRequiresTargetNetworks(operation.Phase) {
+		recovered, err := controller.recoverMissingTargetNetwork(ctx, operation)
+		if err != nil || recovered {
+			return recovered, err
+		}
+	}
+	if applyPhaseRequiresTargetContainers(operation.Phase) {
+		return controller.recoverMissingTargetContainer(ctx, operation)
+	}
+	return false, nil
+}
+
+func applyPhaseRequiresTargetNetworks(phase string) bool {
+	switch phase {
+	case phaseResync, phaseCreate, phaseAttach, phaseStart, phaseCommit:
+		return true
+	default:
+		return false
+	}
+}
+
+func applyPhaseRequiresTargetContainers(phase string) bool {
+	switch phase {
+	case phaseAttach, phaseStart, phaseCommit:
+		return true
+	default:
+		return false
+	}
+}
+
+func (controller *Controller) recoverMissingTargetNetwork(
+	ctx context.Context,
+	operation *state.Operation,
+) (bool, error) {
+	scope := controller.dockerScope(operation.Target.Name)
+	plans, err := resolvedTopology(scope, operation.Target)
+	if err != nil {
+		return false, err
+	}
+	for _, key := range sortedNetworkKeys(plans) {
+		resource, exists := operation.Networks[key]
+		if !exists {
+			if len(plans[key].Members) != 0 {
+				for component := range plans[key].Members {
+					if _, recorded := operation.Containers[component]; recorded {
+						return false, fmt.Errorf(
+							"apply phase %s has %s container but no recorded network %s",
+							operation.Phase,
+							component,
+							key,
+						)
+					}
+				}
+			}
+			if err := controller.setPhase(operation, phaseNetworks); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+		actual, inspectErr := controller.inspectNetwork(ctx, resource.ID)
+		if inspectErr == nil {
+			if err := verifyNetwork(scope, plans[key], resource, actual); err != nil {
+				return false, err
+			}
+			continue
+		}
+		if !errors.Is(inspectErr, engine.ErrNotFound) {
+			return false, inspectErr
+		}
+		occupant, nameErr := controller.inspectNetwork(ctx, plans[key].Name)
+		if nameErr == nil {
+			return false, fmt.Errorf(
+				"network name %q no longer identifies recorded network %s; found %s",
+				plans[key].Name,
+				resource.ID,
+				occupant.ID,
+			)
+		}
+		if !errors.Is(nameErr, engine.ErrNotFound) {
+			return false, nameErr
+		}
+
+		if err := controller.removeContainersPinnedToNetworkGeneration(
+			ctx,
+			operation,
+			plans[key],
+		); err != nil {
+			return false, err
+		}
+		delete(operation.Networks, key)
+		delete(operation.PendingCreates, networkCreateKey(key))
+		if err := controller.setPhase(operation, phaseNetworks); err != nil {
+			return false, err
+		}
+		controller.report("recreating missing network %s", key)
+		return true, nil
+	}
+	return false, nil
+}
+
+func (controller *Controller) removeContainersPinnedToNetworkGeneration(
+	ctx context.Context,
+	operation *state.Operation,
+	plan networkPlan,
+) error {
+	members := make([]string, 0, len(plan.Members))
+	for component := range plan.Members {
+		members = append(members, component)
+	}
+	sort.Strings(members)
+	for _, name := range members {
+		component, declared := operation.Target.Component(name)
+		if !declared {
+			return fmt.Errorf("network %s names unknown component %s", plan.Key, name)
+		}
+		if _, recorded := operation.Containers[name]; !recorded {
+			continue
+		}
+		if err := controller.removeTargetContainerForRecreate(
+			ctx,
+			operation,
+			component,
+		); err != nil {
+			return fmt.Errorf(
+				"remove %s after network %s disappeared: %w",
+				name,
+				plan.Key,
+				err,
+			)
+		}
+	}
+	return nil
+}
+
+func (controller *Controller) recoverMissingTargetContainer(
+	ctx context.Context,
+	operation *state.Operation,
+) (bool, error) {
+	for _, component := range operation.Target.Components {
+		resource, exists := operation.Containers[component.Name]
+		if !exists {
+			if err := controller.setPhase(operation, phaseCreate); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+		_, inspectErr := controller.inspectContainer(ctx, resource.ID)
+		if inspectErr == nil {
+			continue
+		}
+		if !errors.Is(inspectErr, engine.ErrNotFound) {
+			return false, inspectErr
+		}
+		if err := controller.removeTargetContainerForRecreate(
+			ctx,
+			operation,
+			component,
+		); err != nil {
+			return false, fmt.Errorf(
+				"recover missing %s container: %w",
+				component.Name,
+				err,
+			)
+		}
+		if err := controller.setPhase(operation, phaseCreate); err != nil {
+			return false, err
+		}
+		controller.report("recreating missing component %s", component.Name)
+		return true, nil
+	}
+	return false, nil
+}
+
+func (controller *Controller) removeTargetContainerForRecreate(
+	ctx context.Context,
+	operation *state.Operation,
+	component composition.ResolvedComponent,
+) error {
+	resource, exists := operation.Containers[component.Name]
+	if !exists {
+		return nil
+	}
+	actual, inspectErr := controller.inspectContainer(ctx, resource.ID)
+	if errors.Is(inspectErr, engine.ErrNotFound) {
+		cleanupSpec := operation.Target
+		cleanupNetworks := operation.Networks
+		cleanupComponent := component
+		if operation.Previous != nil {
+			previousResource, previousRecorded := operation.Previous.Containers[component.Name]
+			previousComponent, previousDeclared := operation.Previous.Spec.Component(component.Name)
+			if previousRecorded && previousResource.ID == resource.ID {
+				if !previousDeclared {
+					return fmt.Errorf("recorded previous container %s is not declared", component.Name)
+				}
+				cleanupSpec = operation.Previous.Spec
+				cleanupNetworks = operation.Previous.Networks
+				cleanupComponent = previousComponent
+			}
+		}
+		if err := controller.recoverAbsentComponentEndpointCleanup(
+			ctx,
+			operation,
+			cleanupSpec,
+			cleanupNetworks,
+			cleanupComponent,
+			resource,
+		); err != nil {
+			return err
+		}
+		delete(operation.Containers, component.Name)
+		delete(operation.Completed, component.Name)
+		delete(operation.PendingCreates, containerCreateKey(component.Name))
+		return nil
+	}
+	if inspectErr != nil {
+		return inspectErr
+	}
+	runtimeDir := runtimeDirectory(operation.RuntimeRoot, operation.Target.Name)
+	if operation.Proxy != nil {
+		runtimeDir = operation.Proxy.RuntimeDir
+	}
+	scope := controller.dockerScope(operation.Target.Name)
+	if err := verifyCurrentContainer(
+		scope,
+		runtimeDir,
+		component,
+		resource,
+		actual,
+	); err != nil {
+		return err
+	}
+	if err := verifyContainerEnvironment(operation.Target, component, actual); err != nil {
+		return err
+	}
+	if err := verifyNoUnknownContainerNetworksWithFallback(
+		component,
+		operation.Networks,
+		previousNetworks(operation),
+		actual,
+	); err != nil {
+		return err
+	}
+	cleanupNetworks := targetContainerEndpointNetworks(operation, component, actual)
+	if err := controller.prepareEndpointCleanup(
+		ctx,
+		operation,
+		operation.Target,
+		cleanupNetworks,
+		component,
+		resource,
+	); err != nil {
+		return err
+	}
+	if actual.Running {
+		callCtx, cancel := controller.callContext(ctx)
+		err := controller.Engine.StopContainer(
+			callCtx,
+			resource.ID,
+			controller.stopTimeout(),
+		)
+		cancel()
+		if err != nil && !errors.Is(err, engine.ErrNotFound) {
+			return err
+		}
+	}
+	callCtx, cancel := controller.callContext(ctx)
+	removeErr := controller.Engine.RemoveContainer(callCtx, resource.ID)
+	cancel()
+	if removeErr != nil && !errors.Is(removeErr, engine.ErrNotFound) {
+		return removeErr
+	}
+	if err := controller.recoverContainerEndpointCleanups(
+		ctx,
+		operation,
+		resource.ID,
+	); err != nil {
+		return err
+	}
+	delete(operation.Containers, component.Name)
+	delete(operation.Completed, component.Name)
+	delete(operation.PendingCreates, containerCreateKey(component.Name))
+	return nil
+}
+
+func targetContainerEndpointNetworks(
+	operation *state.Operation,
+	component composition.ResolvedComponent,
+	actual engine.Container,
+) map[string]state.Resource {
+	if !component.Runtime.ExternalEgress || operation.Previous == nil {
+		return operation.Networks
+	}
+	key := componentNetworkKey(component.Name)
+	target, hasTarget := operation.Networks[key]
+	previous, hasPrevious := operation.Previous.Networks[key]
+	if !hasTarget || !hasPrevious || target.ID == previous.ID {
+		return operation.Networks
+	}
+	_, attachment, attached := findContainerNetwork(actual, previous)
+	if attached && attachment.NetworkID == previous.ID {
+		return operation.Previous.Networks
+	}
+	return operation.Networks
 }
 
 func (controller *Controller) retireChangedContainers(
@@ -737,7 +1064,27 @@ func (controller *Controller) ensureNetwork(
 		if !errors.Is(err, engine.ErrNotFound) {
 			return err
 		}
+		occupant, nameErr := controller.inspectNetwork(ctx, plan.Name)
+		if nameErr == nil {
+			return fmt.Errorf(
+				"network name %q no longer identifies recorded network %s; found %s",
+				plan.Name,
+				resource.ID,
+				occupant.ID,
+			)
+		}
+		if !errors.Is(nameErr, engine.ErrNotFound) {
+			return nameErr
+		}
+		if err := controller.removeContainersPinnedToNetworkGeneration(
+			ctx,
+			operation,
+			plan,
+		); err != nil {
+			return err
+		}
 		delete(operation.Networks, plan.Key)
+		delete(operation.PendingCreates, pendingKey)
 		if err := controller.State.WriteOperation(operation.Target.Name, *operation); err != nil {
 			return err
 		}
@@ -860,7 +1207,13 @@ func (controller *Controller) ensureContainer(
 		if !errors.Is(err, engine.ErrNotFound) {
 			return err
 		}
-		delete(operation.Containers, component.Name)
+		if err := controller.removeTargetContainerForRecreate(
+			ctx,
+			operation,
+			component,
+		); err != nil {
+			return fmt.Errorf("recover missing %s container: %w", component.Name, err)
+		}
 		if err := controller.State.WriteOperation(operation.Target.Name, *operation); err != nil {
 			return err
 		}
@@ -1158,6 +1511,9 @@ func (controller *Controller) reconcileAttachments(
 			expected[network.ID] = network
 		}
 		for name, attachment := range actual.Networks {
+			if _, wanted := matchContainerNetwork(name, attachment, expected); wanted {
+				continue
+			}
 			observed, owned := matchContainerNetwork(name, attachment, known)
 			if !owned {
 				return fmt.Errorf(
@@ -1165,9 +1521,6 @@ func (controller *Controller) reconcileAttachments(
 					component.Name,
 					observedNetworkDescription(name, attachment),
 				)
-			}
-			if _, wanted := expected[observed.ID]; wanted {
-				continue
 			}
 			disconnects = append(disconnects, networkChange{
 				component: component.Name,
@@ -1350,7 +1703,7 @@ func (controller *Controller) removeObsoleteNetworks(
 	return nil
 }
 
-func (controller *Controller) startNewContainers(
+func (controller *Controller) ensureTargetContainersRunning(
 	ctx context.Context,
 	operation *state.Operation,
 ) error {
@@ -1366,18 +1719,9 @@ func (controller *Controller) startNewContainers(
 		return err
 	}
 	for _, component := range operation.Target.Components {
-		resource := operation.Containers[component.Name]
-		if operation.Completed[component.Name] {
-			continue
-		}
-		if operation.Previous != nil {
-			if previous, exists := operation.Previous.Containers[component.Name]; exists &&
-				previous.ID == resource.ID {
-				if err := controller.markComplete(operation, component.Name); err != nil {
-					return err
-				}
-				continue
-			}
+		resource, exists := operation.Containers[component.Name]
+		if !exists {
+			return fmt.Errorf("target has no %s container", component.Name)
 		}
 		actual, inspectErr := controller.inspectContainer(ctx, resource.ID)
 		if inspectErr != nil {
@@ -1407,8 +1751,10 @@ func (controller *Controller) startNewContainers(
 			}
 			controller.report("started component %s", component.Name)
 		}
-		if err := controller.markComplete(operation, component.Name); err != nil {
-			return err
+		if !operation.Completed[component.Name] {
+			if err := controller.markComplete(operation, component.Name); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

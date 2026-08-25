@@ -1,6 +1,7 @@
 package state
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -270,5 +271,276 @@ func TestOperationRoundTripsEndpointCleanupJournal(t *testing.T) {
 	}
 	if !exists || !reflect.DeepEqual(read.EndpointCleanups, operation.EndpointCleanups) {
 		t.Fatalf("endpoint cleanup round trip = %#v", read.EndpointCleanups)
+	}
+}
+
+func TestOperationJournalsAndValidatesCompleteTargetWiring(t *testing.T) {
+	store := Store{Root: t.TempDir()}
+	target := composition.ResolvedSpec{
+		Name: "demo", Digest: "sha256:system",
+		Components: []composition.ResolvedComponent{
+			{Name: "source", Definition: composition.Definition{Outputs: []composition.Endpoint{{Name: "stream"}}}},
+			{Name: "sink", Definition: composition.Definition{Inputs: []composition.Endpoint{{Name: "stream"}}}},
+		},
+		Links: []composition.Link{{
+			Input:  composition.EndpointRef{Component: "sink", Endpoint: "stream"},
+			Output: composition.EndpointRef{Component: "source", Endpoint: "stream"},
+		}},
+	}
+	operation, err := NewOperation("apply", "retire", target, nil, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operation.TargetWiring.Endpoints) != 2 ||
+		len(operation.TargetWiring.Links) != 1 ||
+		operation.TargetWiringDigest == "" {
+		t.Fatalf("operation did not journal complete wiring: %#v", operation)
+	}
+	if err := store.WriteOperation(target.Name, operation); err != nil {
+		t.Fatal(err)
+	}
+
+	tampered := operation
+	tampered.TargetWiring.Links = append([]proxy.Link(nil), operation.TargetWiring.Links...)
+	tampered.TargetWiring.Links[0].OutputComponent = "intruder"
+	if err := store.WriteOperation(target.Name, tampered); err == nil ||
+		!strings.Contains(err.Error(), "target wiring") {
+		t.Fatalf("tampered target wiring error = %v", err)
+	}
+}
+
+func TestNonApplyOperationOmitsTargetWiring(t *testing.T) {
+	target := composition.ResolvedSpec{
+		Name: "demo", Digest: "sha256:system",
+		Components: []composition.ResolvedComponent{{
+			Name:       "source",
+			Definition: composition.Definition{Outputs: []composition.Endpoint{{Name: "stream"}}},
+		}},
+	}
+	for _, kind := range []string{"down", "restart"} {
+		t.Run(kind, func(t *testing.T) {
+			store := Store{Root: t.TempDir()}
+			operation, err := NewOperation(kind, kind, target, nil, t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if operation.TargetWiringDigest != "" ||
+				len(operation.TargetWiring.Endpoints) != 0 ||
+				len(operation.TargetWiring.Links) != 0 {
+				t.Fatalf("%s operation contains target wiring: %#v", kind, operation.TargetWiring)
+			}
+			if err := store.WriteOperation(target.Name, operation); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(filepath.Join(store.Root, "systems", target.Name, "operation.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(data), `"target_wiring":`) ||
+				strings.Contains(string(data), `"target_wiring_digest":`) {
+				t.Fatalf("%s journal contains target wiring: %s", kind, data)
+			}
+			read, exists, err := store.ReadOperation(target.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !exists || read.TargetWiringDigest != "" ||
+				len(read.TargetWiring.Endpoints) != 0 || len(read.TargetWiring.Links) != 0 {
+				t.Fatalf("read %s operation contains target wiring: %#v", kind, read)
+			}
+		})
+	}
+}
+
+func TestApplyOperationRequiresCompleteTargetWiring(t *testing.T) {
+	store := Store{Root: t.TempDir()}
+	target := composition.ResolvedSpec{Name: "demo", Digest: "sha256:system"}
+	operation, err := NewOperation("apply", "resync", target, nil, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation.TargetWiring = proxy.Wiring{}
+	operation.TargetWiringDigest = ""
+	if err := store.WriteOperation(target.Name, operation); err == nil ||
+		!strings.Contains(err.Error(), "target wiring") {
+		t.Fatalf("WriteOperation missing target wiring error = %v", err)
+	}
+}
+
+func TestRejectsPreviousReleaseStateVersions(t *testing.T) {
+	t.Run("engine-binding", func(t *testing.T) {
+		store := Store{Root: t.TempDir()}
+		const previous = "{\"version\":1,\"id\":\"engine-id\"}\n"
+		if err := os.WriteFile(
+			filepath.Join(store.Root, "engine.json"),
+			[]byte(previous),
+			0600,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := store.ReadEngine(); err == nil ||
+			!strings.Contains(err.Error(), "unsupported engine binding version 1") {
+			t.Fatalf("ReadEngine previous version error = %v", err)
+		}
+		if err := store.BindEngine("engine-id"); err == nil ||
+			!strings.Contains(err.Error(), "unsupported engine binding version 1") {
+			t.Fatalf("BindEngine previous version error = %v", err)
+		}
+		data, err := os.ReadFile(filepath.Join(store.Root, "engine.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(data) != previous {
+			t.Fatalf("BindEngine rewrote previous binding: %s", data)
+		}
+	})
+
+	for _, filename := range []string{"desired.json", "operation.json"} {
+		t.Run(filename, func(t *testing.T) {
+			store := Store{Root: t.TempDir()}
+			directory := filepath.Join(store.Root, "systems", "demo")
+			if err := os.MkdirAll(directory, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(
+				filepath.Join(directory, filename), []byte("{\"version\":3}\n"), 0600,
+			); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			if filename == "desired.json" {
+				_, _, err = store.ReadDesired("demo")
+			} else {
+				_, _, err = store.ReadOperation("demo")
+			}
+			if err == nil || !strings.Contains(err.Error(), "unsupported") ||
+				!strings.Contains(err.Error(), "version 3") {
+				t.Fatalf("read %s previous version error = %v", filename, err)
+			}
+		})
+	}
+}
+
+func TestOversizedStateWriteDoesNotReplaceReadableJournal(t *testing.T) {
+	const documentLimit = 16 * 1024 * 1024
+	store := Store{Root: t.TempDir()}
+	target := composition.ResolvedSpec{
+		Name: "demo", Digest: "sha256:small",
+		Components: []composition.ResolvedComponent{{
+			Name: "worker", ImageRef: "worker:v1", ImageID: "sha256:worker",
+			Digest: "sha256:worker-definition",
+		}},
+	}
+	operation, err := NewOperation("apply", "retire", target, nil, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	exact := operation
+	exact.Target.Digest = "sha256:exact-limit"
+	exact.Target.Components = append(
+		[]composition.ResolvedComponent(nil), operation.Target.Components...,
+	)
+	exact.Target.Components[0].ImageRef = ""
+	encoded, err := json.MarshalIndent(exact, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloadLength := documentLimit - len(encoded) - 1 // Encoder.Encode appends '\n'.
+	if payloadLength <= 0 {
+		t.Fatalf("operation fixture without payload is already %d bytes", len(encoded)+1)
+	}
+	exact.Target.Components[0].ImageRef = strings.Repeat("x", payloadLength)
+	if err := store.WriteOperation(target.Name, exact); err != nil {
+		t.Fatalf("write exact-limit operation: %v", err)
+	}
+	path := filepath.Join(store.Root, "systems", target.Name, "operation.json")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != documentLimit {
+		t.Fatalf("exact-limit journal size = %d, want %d", info.Size(), documentLimit)
+	}
+
+	oversized := exact
+	oversized.Target.Digest = "sha256:overx-limit"
+	oversized.Target.Components = append(
+		[]composition.ResolvedComponent(nil), exact.Target.Components...,
+	)
+	oversized.Target.Components[0].ImageRef += "x"
+	if err := store.WriteOperation(target.Name, oversized); err == nil {
+		t.Error("oversized operation replaced the durable journal")
+	}
+
+	read, exists, err := store.ReadOperation(target.Name)
+	if err != nil {
+		t.Fatalf("read journal after rejected oversized write: %v", err)
+	}
+	if !exists || read.Target.Digest != exact.Target.Digest {
+		t.Fatalf(
+			"journal after oversized write = exists %t digest %q, want %q",
+			exists, read.Target.Digest, exact.Target.Digest,
+		)
+	}
+}
+
+func TestStateDocumentReadBoundary(t *testing.T) {
+	const documentLimit = 16 * 1024 * 1024
+	for _, test := range []struct {
+		name      string
+		extraByte int
+		wantError bool
+	}{
+		{name: "exact-limit", extraByte: 0, wantError: false},
+		{name: "one-byte-over", extraByte: 1, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := Store{Root: t.TempDir()}
+			runtimeRoot := t.TempDir()
+			runtimeDir := filepath.Join(runtimeRoot, "demo")
+			deployment := Deployment{
+				Spec: composition.ResolvedSpec{
+					Name: "demo", Digest: "sha256:system",
+				},
+				RuntimeRoot: runtimeRoot,
+				Proxy: &proxy.Process{
+					InstanceID: "proxy-instance", Digest: "sha256:wiring", PID: 100,
+					RuntimeDir: runtimeDir, Control: proxy.ControlSocket(runtimeDir),
+					Log: filepath.Join(runtimeDir, proxy.LogFileName),
+				},
+				Networks: map[string]Resource{}, Containers: map[string]Resource{},
+			}
+			if err := store.WriteDesired("demo", deployment); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(store.Root, "systems", "demo", "desired.json")
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			padding := documentLimit + test.extraByte - int(info.Size())
+			if padding < 0 {
+				t.Fatalf("desired-state fixture is already %d bytes", info.Size())
+			}
+			file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := file.WriteString(strings.Repeat(" ", padding)); err != nil {
+				_ = file.Close()
+				t.Fatal(err)
+			}
+			if err := file.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			_, _, err = store.ReadDesired("demo")
+			if test.wantError && err == nil {
+				t.Fatal("state reader accepted a document one byte over the limit")
+			}
+			if !test.wantError && err != nil {
+				t.Fatalf("read exact-limit state document: %v", err)
+			}
+		})
 	}
 }

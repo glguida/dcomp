@@ -21,7 +21,7 @@ const (
 	kindRestart = "restart"
 
 	phaseNetworks = "networks"
-	phaseProxy    = "proxy"
+	phaseResync   = "resync"
 	phaseRetire   = "retire"
 	phaseCreate   = "create"
 	phaseAttach   = "attach"
@@ -204,9 +204,9 @@ func (controller *Controller) Resume(ctx context.Context, name string) error {
 }
 
 // Abort stops an operation without treating retained components as new
-// resources. For an interrupted apply it removes only target objects not
-// present in the previous committed deployment. It does not attempt rollback;
-// a later Up repairs any previous component already retired by the operation.
+// resources. For an interrupted apply it removes target-only objects and
+// restores the previous wiring. If reverse resync cannot converge, abort
+// durably hands off to a fresh apply of the previous deployment.
 func (controller *Controller) Abort(ctx context.Context, name string) error {
 	if err := controller.validate(); err != nil {
 		return err

@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/glguida/dcomp/engine"
+	"github.com/glguida/dcomp/proxy"
 	"github.com/glguida/dcomp/state"
 )
 
@@ -274,15 +275,8 @@ func (controller *Controller) executeAbort(
 	if err := controller.recoverRetiredPreviousEndpoints(ctx, operation); err != nil {
 		return fmt.Errorf("recover previous network endpoints during abort: %w", err)
 	}
-	if operation.Proxy != nil &&
-		(operation.Previous == nil || !proxyProcessMatches(operation.Proxy, operation.Previous.Proxy)) {
-		if err := controller.stopRecordedProxy(ctx, operation.Proxy); err != nil {
-			return fmt.Errorf("stop proxy during abort: %w", err)
-		}
-		operation.Proxy = nil
-		if err := controller.State.WriteOperation(operation.Target.Name, *operation); err != nil {
-			return err
-		}
+	if err := controller.restorePreviousProxyDuringAbort(ctx, operation); err != nil {
+		return err
 	}
 
 	// A retained component may have been attached to a replacement component
@@ -357,11 +351,149 @@ func (controller *Controller) executeAbort(
 	} else if err := controller.State.ClearDesired(operation.Target.Name); err != nil {
 		return err
 	}
+	if operation.AbortRecreatePrevious && operation.Previous != nil {
+		if err := controller.handoffAbortToPreviousApply(ctx, operation); err != nil {
+			return err
+		}
+		controller.report("aborted apply for %s", operation.Target.Name)
+		return nil
+	}
 	if err := controller.State.ClearOperation(operation.Target.Name); err != nil {
 		return err
 	}
 	controller.report("aborted apply for %s", operation.Target.Name)
 	return nil
+}
+
+// handoffAbortToPreviousApply replaces the durable abort journal with a fresh
+// apply journal before recreation begins. There is deliberately no clear-state
+// gap: after the write, a crash resumes the replacement apply rather than
+// leaving desired state pointing at the fleet the abort fallback removed.
+func (controller *Controller) handoffAbortToPreviousApply(
+	ctx context.Context,
+	operation *state.Operation,
+) error {
+	if operation.Previous == nil {
+		return fmt.Errorf("cannot recreate a missing previous deployment")
+	}
+	previous := *operation.Previous
+	restorer := *controller
+	restorer.RuntimeRoot = previous.RuntimeRoot
+	replacement, err := state.NewOperation(
+		kindApply,
+		phaseRetire,
+		previous.Spec,
+		&previous,
+		previous.RuntimeRoot,
+	)
+	if err != nil {
+		return fmt.Errorf("journal previous fleet recreation: %w", err)
+	}
+	if err := restorer.selectRetainedResources(ctx, &replacement); err != nil {
+		return fmt.Errorf("select resources for previous fleet recreation: %w", err)
+	}
+	if err := restorer.State.WriteOperation(previous.Spec.Name, replacement); err != nil {
+		return fmt.Errorf("journal previous fleet recreation: %w", err)
+	}
+	if err := restorer.executeApply(ctx, &replacement); err != nil {
+		return fmt.Errorf("recreate previous fleet during abort: %w", err)
+	}
+	return nil
+}
+
+func (controller *Controller) restorePreviousProxyDuringAbort(
+	ctx context.Context,
+	operation *state.Operation,
+) error {
+	if operation.Previous == nil {
+		if operation.Proxy != nil {
+			if err := controller.stopRecordedProxy(ctx, operation.Proxy); err != nil {
+				return fmt.Errorf("stop proxy during abort: %w", err)
+			}
+			operation.Proxy = nil
+			return controller.State.WriteOperation(operation.Target.Name, *operation)
+		}
+		return nil
+	}
+	if !operation.AbortRecreatePrevious {
+		previousWiring, err := proxy.NewWiring(operation.Previous.Spec)
+		if err != nil {
+			return fmt.Errorf("derive previous wiring during abort: %w", err)
+		}
+		previousDigest, err := previousWiring.Digest()
+		if err != nil {
+			return fmt.Errorf("digest previous wiring during abort: %w", err)
+		}
+		if proxyProcessMatches(operation.Proxy, operation.Previous.Proxy) {
+			status, inspectErr := controller.inspectProxy(ctx, *operation.Proxy)
+			if inspectErr != nil && !errors.Is(inspectErr, proxy.ErrNotRunning) {
+				return fmt.Errorf("inspect proxy during abort: %w", inspectErr)
+			}
+			if inspectErr == nil && status.Ready && status.Digest == previousDigest {
+				return controller.recordPreviousProxyDigest(operation, previousDigest)
+			}
+			if inspectErr == nil {
+				for attempt := 0; attempt < 2; attempt++ {
+					callCtx, cancel := controller.callContext(ctx)
+					response, resyncErr := controller.Proxy.Resync(
+						callCtx, *operation.Proxy, previousWiring, previousDigest,
+					)
+					cancel()
+					if resyncErr == nil && response.Ready && response.Digest == previousDigest {
+						controller.report("restored previous proxy wiring for %s", operation.Target.Name)
+						return controller.recordPreviousProxyDigest(operation, previousDigest)
+					}
+					// Caller cancellation says nothing about whether reverse resync can
+					// converge on a later resume. Keep the fallback choice uncommitted.
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+					if errors.Is(resyncErr, proxy.ErrIdentityMismatch) {
+						return fmt.Errorf("reverse resync proxy during abort: %w", resyncErr)
+					}
+					if errors.Is(resyncErr, proxy.ErrControlProtocolMismatch) {
+						return fmt.Errorf("reverse resync proxy during abort: %w", resyncErr)
+					}
+				}
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		// Reverse resync was unavailable or could not converge. Persist the chosen
+		// fallback before removing retained containers so resume cannot mistake the
+		// operation for a still-reversible abort.
+		operation.AbortRecreatePrevious = true
+		if err := controller.State.WriteOperation(operation.Target.Name, *operation); err != nil {
+			return err
+		}
+	}
+	if operation.Proxy != nil {
+		if err := controller.stopRecordedProxy(ctx, operation.Proxy); err != nil {
+			return fmt.Errorf("stop proxy during abort fallback: %w", err)
+		}
+		operation.Proxy = nil
+		if err := controller.State.WriteOperation(operation.Target.Name, *operation); err != nil {
+			return err
+		}
+	}
+	if err := controller.removeContainersWithStaleProxyMounts(ctx, operation); err != nil {
+		return fmt.Errorf("remove socket-mounted containers during abort fallback: %w", err)
+	}
+	return nil
+}
+
+func (controller *Controller) recordPreviousProxyDigest(
+	operation *state.Operation,
+	digest string,
+) error {
+	if operation.Proxy == nil || operation.Previous == nil {
+		return fmt.Errorf("cannot record previous wiring without both proxy records")
+	}
+	operation.Proxy.Digest = digest
+	operation.Previous.Proxy = cloneProxy(operation.Proxy)
+	return controller.State.WriteOperation(operation.Target.Name, *operation)
 }
 
 func (controller *Controller) executeDown(
@@ -569,6 +701,10 @@ func (controller *Controller) preflightCommittedDeployment(
 	if deployment.Proxy == nil {
 		return fmt.Errorf("deployment has no proxy record")
 	}
+	if _, err := controller.inspectProxy(ctx, *deployment.Proxy); err != nil &&
+		!errors.Is(err, proxy.ErrNotRunning) {
+		return fmt.Errorf("inspect proxy before down: %w", err)
+	}
 	scope := controller.dockerScope(deployment.Spec.Name)
 	plans, err := resolvedTopology(scope, deployment.Spec)
 	if err != nil {
@@ -645,8 +781,17 @@ func (controller *Controller) preflightSelectedContainers(
 	if deployment.Proxy == nil {
 		return fmt.Errorf("deployment has no proxy record")
 	}
-	if _, err := controller.inspectProxy(ctx, *deployment.Proxy); err != nil {
+	status, err := controller.inspectProxy(ctx, *deployment.Proxy)
+	if err != nil {
 		return fmt.Errorf("inspect proxy before restart: %w", err)
+	}
+	if !status.Ready || status.Digest != deployment.Proxy.Digest {
+		return fmt.Errorf(
+			"proxy is not converged before restart: ready=%t, wiring=%q, expected %q",
+			status.Ready,
+			status.Digest,
+			deployment.Proxy.Digest,
+		)
 	}
 	scope := controller.dockerScope(deployment.Spec.Name)
 	plans, err := resolvedTopology(scope, deployment.Spec)

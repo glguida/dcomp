@@ -336,20 +336,51 @@ func verifyNoUnknownContainerNetworks(
 	resources map[string]state.Resource,
 	actual engine.Container,
 ) error {
-	known := make(map[string]state.Resource, len(resources))
-	for _, resource := range resources {
-		known[resource.ID] = resource
+	return verifyNoUnknownContainerNetworksWithFallback(
+		component,
+		resources,
+		nil,
+		actual,
+	)
+}
+
+// verifyNoUnknownContainerNetworksWithFallback checks the container's own
+// generation first. That matters before first start, when Docker reports a
+// configured network name but no network ID and two DComp generations can
+// have owned different networks at that same deterministic name.
+func verifyNoUnknownContainerNetworksWithFallback(
+	component composition.ResolvedComponent,
+	primary map[string]state.Resource,
+	fallback map[string]state.Resource,
+	actual engine.Container,
+) error {
+	primaryByID := resourcesByID(primary)
+	knownByID := resourcesByID(primary)
+	for _, resource := range fallback {
+		knownByID[resource.ID] = resource
 	}
 	for name, attachment := range actual.Networks {
-		if _, exists := matchContainerNetwork(name, attachment, known); !exists {
-			return fmt.Errorf(
-				"%s is attached to undeclared network %s",
-				component.Name,
-				observedNetworkDescription(name, attachment),
-			)
+		if _, exists := matchContainerNetwork(name, attachment, primaryByID); exists {
+			continue
 		}
+		if _, exists := matchContainerNetwork(name, attachment, knownByID); exists {
+			continue
+		}
+		return fmt.Errorf(
+			"%s is attached to undeclared network %s",
+			component.Name,
+			observedNetworkDescription(name, attachment),
+		)
 	}
 	return nil
+}
+
+func resourcesByID(resources map[string]state.Resource) map[string]state.Resource {
+	byID := make(map[string]state.Resource, len(resources))
+	for _, resource := range resources {
+		byID[resource.ID] = resource
+	}
+	return byID
 }
 
 func findContainerNetwork(

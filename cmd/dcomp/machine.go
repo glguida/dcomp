@@ -11,7 +11,7 @@ import (
 
 const (
 	apiVersion = 2
-	version    = "0.2.0"
+	version    = "0.2.1"
 )
 
 type versionDocument struct {
@@ -36,7 +36,7 @@ type statusDocument struct {
 
 type proxyStatusDocument struct {
 	InstanceID        string              `json:"instance_id"`
-	Digest            string              `json:"digest"`
+	Digest            string              `json:"digest,omitempty"`
 	PID               int                 `json:"pid"`
 	Ready             bool                `json:"ready"`
 	Inputs            int                 `json:"inputs"`

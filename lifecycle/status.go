@@ -325,7 +325,6 @@ func (controller *Controller) observeStatusResources(
 		result.Proxy.Problem = "not created"
 	} else {
 		result.Proxy.InstanceID = process.InstanceID
-		result.Proxy.Digest = process.Digest
 		result.Proxy.PID = process.PID
 		status, inspectErr := controller.inspectProxy(ctx, *process)
 		if errors.Is(inspectErr, proxy.ErrNotRunning) {
@@ -333,11 +332,20 @@ func (controller *Controller) observeStatusResources(
 		} else if inspectErr != nil {
 			result.Proxy.Problem = inspectErr.Error()
 		} else {
+			result.Proxy.Digest = status.Digest
 			result.Proxy.Ready = status.Ready
 			result.Proxy.Inputs = status.Inputs
 			result.Proxy.Outputs = status.Outputs
 			result.Proxy.ActiveConnections = status.ActiveConnections
 			result.Proxy.Links = append([]proxy.LinkMetrics(nil), status.Links...)
+			wiring, wiringErr := proxy.NewWiring(spec)
+			if wiringErr != nil {
+				result.Proxy.Problem = wiringErr.Error()
+			} else if expectedDigest, digestErr := wiring.Digest(); digestErr != nil {
+				result.Proxy.Problem = digestErr.Error()
+			} else if status.Ready && status.Digest != expectedDigest {
+				result.Proxy.Problem = "proxy reports unexpected wiring digest"
+			}
 		}
 	}
 	expectedRuntimeDir := runtimeDirectory(runtimeRoot, spec.Name)

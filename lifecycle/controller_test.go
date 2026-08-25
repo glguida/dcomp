@@ -13,6 +13,7 @@ import (
 
 	"github.com/glguida/dcomp/composition"
 	"github.com/glguida/dcomp/engine"
+	"github.com/glguida/dcomp/proxy"
 	"github.com/glguida/dcomp/state"
 )
 
@@ -152,6 +153,8 @@ func TestIncrementalApplyPreservesUnchangedContainers(t *testing.T) {
 	first := requireDesired(t, controller.State, initial.Name)
 	providerID := first.Containers["provider"].ID
 	consumerID := first.Containers["consumer"].ID
+	proxyID := first.Proxy.InstanceID
+	manager := controller.Proxy.(*fakeProxyManager)
 
 	withObserver := fanoutSpec("provider:v1", "consumer:v1", "observer:v1")
 	fake.resetCalls()
@@ -159,13 +162,17 @@ func TestIncrementalApplyPreservesUnchangedContainers(t *testing.T) {
 		t.Fatal(err)
 	}
 	second := requireDesired(t, controller.State, withObserver.Name)
-	if second.Containers["provider"].ID == providerID ||
-		second.Containers["consumer"].ID == consumerID {
-		t.Fatal("wiring change retained a container with a stale socket mount")
+	requireSameContainer(t, second, "provider", providerID)
+	requireSameContainer(t, second, "consumer", consumerID)
+	if second.Proxy.InstanceID != proxyID {
+		t.Fatal("adding a component replaced the proxy")
 	}
-	providerID = second.Containers["provider"].ID
-	consumerID = second.Containers["consumer"].ID
+	assertContainerUntouched(t, fake, providerID)
+	assertContainerUntouched(t, fake, consumerID)
 	observerV1 := second.Containers["observer"].ID
+	manager.mu.Lock()
+	resyncsBeforeImageChange := manager.resyncs
+	manager.mu.Unlock()
 
 	changedObserver := fanoutSpec("provider:v1", "consumer:v1", "observer:v2")
 	fake.resetCalls()
@@ -180,15 +187,22 @@ func TestIncrementalApplyPreservesUnchangedContainers(t *testing.T) {
 	}
 	assertContainerUntouched(t, fake, providerID)
 	assertContainerUntouched(t, fake, consumerID)
+	manager.mu.Lock()
+	resyncsAfterImageChange := manager.resyncs
+	manager.mu.Unlock()
+	if resyncsAfterImageChange != resyncsBeforeImageChange {
+		t.Fatal("image-only change resynced unchanged wiring")
+	}
 
 	fake.resetCalls()
 	if err := controller.Up(context.Background(), initial); err != nil {
 		t.Fatal(err)
 	}
 	final := requireDesired(t, controller.State, initial.Name)
-	if final.Containers["provider"].ID == providerID ||
-		final.Containers["consumer"].ID == consumerID {
-		t.Fatal("removing wiring retained a container with a stale socket mount")
+	requireSameContainer(t, final, "provider", providerID)
+	requireSameContainer(t, final, "consumer", consumerID)
+	if final.Proxy.InstanceID != proxyID {
+		t.Fatal("removing a component replaced the proxy")
 	}
 	if _, exists := final.Containers["observer"]; exists {
 		t.Fatal("removed observer remains in desired state")
@@ -229,6 +243,66 @@ func TestUpRecreatesSocketMountedContainersWhenProxyIsMissing(t *testing.T) {
 		if after.Networks[key].ID != resource.ID {
 			t.Fatalf("unaffected network %s was replaced", key)
 		}
+	}
+}
+
+func TestEndpointPublicationOccursAfterMountingContainerRetires(t *testing.T) {
+	controller, fake := newControllerHarness(t)
+	installImages(
+		fake,
+		"provider:v1", "consumer:v1",
+		"sha256:provider", "sha256:consumer",
+	)
+	initial := linkedSpec("provider:v1", "consumer:v1")
+	if err := controller.Up(context.Background(), initial); err != nil {
+		t.Fatal(err)
+	}
+	before := requireDesired(t, controller.State, initial.Name)
+	newEndpointPath := proxy.HostSocket(
+		before.Proxy.RuntimeDir, proxy.DirectionInput, "consumer", "secondary",
+	)
+	manager := controller.Proxy.(*fakeProxyManager)
+	publicationChecks := 0
+	var mountedAtPublication string
+	manager.beforeResync = func(_ proxy.Wiring) error {
+		publicationChecks++
+		fake.mu.Lock()
+		defer fake.mu.Unlock()
+		for _, container := range fake.containers {
+			for _, mount := range container.Mounts {
+				if mount.Source == newEndpointPath {
+					mountedAtPublication = container.ID
+				}
+			}
+		}
+		return nil
+	}
+
+	target := linkedSpec("provider:v1", "consumer:v1")
+	target.Components[1].Component.Definition.Inputs = append(
+		target.Components[1].Component.Definition.Inputs,
+		composition.Endpoint{Name: "secondary", Service: echoService},
+	)
+	target.Links = append(
+		target.Links,
+		link("consumer", "secondary", "provider", "echo"),
+	)
+	if err := controller.Up(context.Background(), target); err != nil {
+		t.Fatal(err)
+	}
+	after := requireDesired(t, controller.State, target.Name)
+	if publicationChecks != 1 {
+		t.Fatalf("endpoint publication checks = %d, want 1", publicationChecks)
+	}
+	if mountedAtPublication != "" {
+		t.Fatalf("container %s mounted new endpoint at publication", mountedAtPublication)
+	}
+	if after.Containers["consumer"].ID == before.Containers["consumer"].ID {
+		t.Fatal("component with a changed endpoint set was not recreated")
+	}
+	requireSameContainer(t, after, "provider", before.Containers["provider"].ID)
+	if after.Proxy.InstanceID != before.Proxy.InstanceID {
+		t.Fatal("endpoint-set change replaced the proxy process")
 	}
 }
 
@@ -278,7 +352,438 @@ func TestResumeRecreatesSocketMountedContainersWhenProxyDiesDuringApply(t *testi
 	}
 }
 
-func TestRetargetedInputReplacesProxyAndSocketMountedComponents(t *testing.T) {
+func TestResumeDispatchesJournaledAndLandedResyncByObservedDigest(t *testing.T) {
+	for _, landed := range []bool{false, true} {
+		name := "journaled-before-call"
+		if landed {
+			name = "landed-before-create"
+		}
+		t.Run(name, func(t *testing.T) {
+			controller, fake := newControllerHarness(t)
+			installImages(
+				fake,
+				"provider:v1", "consumer:v1", "observer:v1",
+				"sha256:provider", "sha256:consumer", "sha256:observer",
+			)
+			initial := linkedSpec("provider:v1", "consumer:v1")
+			if err := controller.Up(context.Background(), initial); err != nil {
+				t.Fatal(err)
+			}
+			previous := requireDesired(t, controller.State, initial.Name)
+			target, err := controller.resolve(
+				context.Background(),
+				fanoutSpec("provider:v1", "consumer:v1", "observer:v1"),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			operation, err := state.NewOperation(
+				kindApply, phaseResync, target, &previous, controller.RuntimeRoot,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := controller.selectRetainedResources(
+				context.Background(), &operation,
+			); err != nil {
+				t.Fatal(err)
+			}
+			if err := controller.State.WriteOperation(target.Name, operation); err != nil {
+				t.Fatal(err)
+			}
+			manager := controller.Proxy.(*fakeProxyManager)
+			manager.mu.Lock()
+			resyncsBefore := manager.resyncs
+			manager.mu.Unlock()
+			if landed {
+				if _, err := manager.Resync(
+					context.Background(),
+					*operation.Proxy,
+					operation.TargetWiring,
+					operation.TargetWiringDigest,
+				); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if err := controller.Resume(context.Background(), target.Name); err != nil {
+				t.Fatal(err)
+			}
+			deployed := requireDesired(t, controller.State, target.Name)
+			requireSameContainer(t, deployed, "provider", previous.Containers["provider"].ID)
+			requireSameContainer(t, deployed, "consumer", previous.Containers["consumer"].ID)
+			if deployed.Proxy.InstanceID != previous.Proxy.InstanceID {
+				t.Fatal("resumed minimal apply replaced the proxy")
+			}
+			if deployed.Containers["observer"].ID == "" {
+				t.Fatal("resumed apply did not create observer")
+			}
+			manager.mu.Lock()
+			resyncsAfter := manager.resyncs
+			manager.mu.Unlock()
+			if got := resyncsAfter - resyncsBefore; got != 1 {
+				t.Fatalf("resyncs after journal point = %d, want exactly 1", got)
+			}
+		})
+	}
+}
+
+func TestResumeRetriesUnconvergedProxyThenFallsBackToFullReplacement(t *testing.T) {
+	controller, fake := newControllerHarness(t)
+	installImages(
+		fake,
+		"provider:v1", "consumer:v1", "observer:v1",
+		"sha256:provider", "sha256:consumer", "sha256:observer",
+	)
+	initial := linkedSpec("provider:v1", "consumer:v1")
+	if err := controller.Up(context.Background(), initial); err != nil {
+		t.Fatal(err)
+	}
+	fake.startFailures["observer"] = []error{errors.New("interrupt after resync")}
+	target := fanoutSpec("provider:v1", "consumer:v1", "observer:v1")
+	if err := controller.Up(context.Background(), target); err == nil ||
+		!strings.Contains(err.Error(), "interrupt after resync") {
+		t.Fatalf("target Up error = %v", err)
+	}
+	interrupted := requireOperation(t, controller.State, target.Name)
+	oldProxy := interrupted.Proxy.InstanceID
+	oldContainers := cloneResources(interrupted.Containers)
+	manager := controller.Proxy.(*fakeProxyManager)
+	manager.mu.Lock()
+	process := manager.processes[oldProxy]
+	process.Digest = ""
+	manager.processes[oldProxy] = process
+	manager.ready[oldProxy] = false
+	manager.resyncErrors = []error{
+		errors.New("resync still unconverged"),
+		errors.New("resync still unconverged"),
+	}
+	attemptsBefore := manager.resyncAttempts
+	manager.mu.Unlock()
+
+	if err := controller.Resume(context.Background(), target.Name); err != nil {
+		t.Fatal(err)
+	}
+	deployed := requireDesired(t, controller.State, target.Name)
+	if deployed.Proxy.InstanceID == oldProxy {
+		t.Fatal("unconverged proxy was not replaced")
+	}
+	for name, old := range oldContainers {
+		if deployed.Containers[name].ID == old.ID {
+			t.Fatalf("%s retained a socket mount from the unconverged proxy", name)
+		}
+		if _, exists := fake.containers[old.ID]; exists {
+			t.Fatalf("old %s container %s remains after fallback", name, old.ID)
+		}
+	}
+	manager.mu.Lock()
+	attempts := manager.resyncAttempts - attemptsBefore
+	stops := manager.stops
+	manager.mu.Unlock()
+	if attempts != 2 || stops != 1 {
+		t.Fatalf("fallback attempts/stops = %d/%d, want 2/1", attempts, stops)
+	}
+}
+
+func TestIncompatibleProxyCapabilityIsTerminal(t *testing.T) {
+	controller, fake := newControllerHarness(t)
+	installImages(
+		fake,
+		"provider:v1", "consumer:v1", "observer:v1",
+		"sha256:provider", "sha256:consumer", "sha256:observer",
+	)
+	initial := linkedSpec("provider:v1", "consumer:v1")
+	if err := controller.Up(context.Background(), initial); err != nil {
+		t.Fatal(err)
+	}
+	previous := requireDesired(t, controller.State, initial.Name)
+	manager := controller.Proxy.(*fakeProxyManager)
+	manager.mu.Lock()
+	manager.controlVersions[previous.Proxy.InstanceID] = 0
+	attemptsBefore, ensuresBefore, stopsBefore :=
+		manager.resyncAttempts, manager.ensures, manager.stops
+	manager.mu.Unlock()
+
+	target := fanoutSpec("provider:v1", "consumer:v1", "observer:v1")
+	err := controller.Up(context.Background(), target)
+	if !errors.Is(err, proxy.ErrControlProtocolMismatch) {
+		t.Fatalf("Up error = %v, want ErrControlProtocolMismatch", err)
+	}
+	if _, exists, readErr := controller.State.ReadOperation(target.Name); readErr != nil {
+		t.Fatal(readErr)
+	} else if exists {
+		t.Fatal("protocol mismatch journaled an apply operation")
+	}
+	unchanged := requireDesired(t, controller.State, target.Name)
+	if unchanged.Proxy == nil || unchanged.Proxy.InstanceID != previous.Proxy.InstanceID {
+		t.Fatalf("incompatible proxy identity changed: %#v", unchanged.Proxy)
+	}
+	for _, name := range []string{"provider", "consumer"} {
+		if unchanged.Containers[name].ID != previous.Containers[name].ID {
+			t.Fatalf("%s changed before capability mismatch was reported", name)
+		}
+	}
+	manager.mu.Lock()
+	attempts := manager.resyncAttempts - attemptsBefore
+	ensures := manager.ensures - ensuresBefore
+	stops := manager.stops - stopsBefore
+	manager.mu.Unlock()
+	if attempts != 0 || ensures != 0 || stops != 0 {
+		t.Fatalf("capability mismatch attempts/ensures/stops = %d/%d/%d, want 0/0/0", attempts, ensures, stops)
+	}
+}
+
+func TestDownIncompatibleProxyCapabilityIsTerminalBeforeResourceMutation(t *testing.T) {
+	controller, fake := newControllerHarness(t)
+	installImages(
+		fake,
+		"provider:v1", "consumer:v1",
+		"sha256:provider", "sha256:consumer",
+	)
+	spec := linkedSpec("provider:v1", "consumer:v1")
+	if err := controller.Up(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	previous := requireDesired(t, controller.State, spec.Name)
+	manager := controller.Proxy.(*fakeProxyManager)
+	manager.mu.Lock()
+	manager.controlVersions[previous.Proxy.InstanceID] = 0
+	stopsBefore := manager.stops
+	manager.mu.Unlock()
+	fake.resetCalls()
+
+	err := controller.Down(context.Background(), spec.Name)
+	if !errors.Is(err, proxy.ErrControlProtocolMismatch) {
+		t.Fatalf("Down error = %v, want ErrControlProtocolMismatch", err)
+	}
+	operation := requireOperation(t, controller.State, spec.Name)
+	if operation.Kind != kindDown || len(operation.Completed) != 0 ||
+		operation.Proxy == nil || operation.Proxy.InstanceID != previous.Proxy.InstanceID {
+		t.Fatalf("down operation after protocol mismatch = %#v", operation)
+	}
+	unchanged := requireDesired(t, controller.State, spec.Name)
+	for _, name := range []string{"provider", "consumer"} {
+		requireSameContainer(t, unchanged, name, previous.Containers[name].ID)
+		assertContainerUntouched(t, fake, previous.Containers[name].ID)
+	}
+	manager.mu.Lock()
+	stops := manager.stops - stopsBefore
+	manager.mu.Unlock()
+	if stops != 0 {
+		t.Fatalf("protocol mismatch stopped %d proxies", stops)
+	}
+}
+
+func TestProxyDeathDuringResyncFallsBackToFreshProxyAndMounts(t *testing.T) {
+	controller, fake := newControllerHarness(t)
+	installImages(
+		fake,
+		"provider:v1", "consumer:v1", "observer:v1",
+		"sha256:provider", "sha256:consumer", "sha256:observer",
+	)
+	initial := linkedSpec("provider:v1", "consumer:v1")
+	if err := controller.Up(context.Background(), initial); err != nil {
+		t.Fatal(err)
+	}
+	previous := requireDesired(t, controller.State, initial.Name)
+	manager := controller.Proxy.(*fakeProxyManager)
+	manager.mu.Lock()
+	manager.dieOnResync = true
+	manager.mu.Unlock()
+
+	target := fanoutSpec("provider:v1", "consumer:v1", "observer:v1")
+	if err := controller.Up(context.Background(), target); err != nil {
+		t.Fatal(err)
+	}
+	deployed := requireDesired(t, controller.State, target.Name)
+	if deployed.Proxy.InstanceID == previous.Proxy.InstanceID {
+		t.Fatal("proxy that died during resync was not replaced")
+	}
+	for _, name := range []string{"provider", "consumer"} {
+		if deployed.Containers[name].ID == previous.Containers[name].ID {
+			t.Fatalf("%s retained a bind mount from the dead proxy", name)
+		}
+		if _, exists := fake.containers[previous.Containers[name].ID]; exists {
+			t.Fatalf("stale %s container remains after dead-proxy fallback", name)
+		}
+	}
+}
+
+func TestMissingProxyControlRetainsIdentityUntilCleanupCompletes(t *testing.T) {
+	controller, fake := newControllerHarness(t)
+	installImages(
+		fake,
+		"provider:v1", "consumer:v1", "observer:v1",
+		"sha256:provider", "sha256:consumer", "sha256:observer",
+	)
+	initial := linkedSpec("provider:v1", "consumer:v1")
+	if err := controller.Up(context.Background(), initial); err != nil {
+		t.Fatal(err)
+	}
+	previous := requireDesired(t, controller.State, initial.Name)
+	manager := controller.Proxy.(*fakeProxyManager)
+	manager.mu.Lock()
+	manager.inspectErrors = []error{proxy.ErrNotRunning, proxy.ErrNotRunning}
+	manager.stopErrors = []error{errors.New("proxy cleanup is still in progress")}
+	ensuresBefore := manager.ensures
+	manager.mu.Unlock()
+
+	target := fanoutSpec("provider:v1", "consumer:v1", "observer:v1")
+	err := controller.Up(context.Background(), target)
+	if err == nil || !strings.Contains(err.Error(), "proxy cleanup is still in progress") {
+		t.Fatalf("Up error = %v, want incomplete cleanup", err)
+	}
+	operation := requireOperation(t, controller.State, target.Name)
+	if operation.Proxy == nil || operation.Proxy.InstanceID != previous.Proxy.InstanceID {
+		t.Fatalf("recorded proxy identity was discarded: %#v", operation.Proxy)
+	}
+	manager.mu.Lock()
+	ensureDelta := manager.ensures - ensuresBefore
+	stopAttempts := manager.stopAttempts
+	manager.mu.Unlock()
+	if ensureDelta != 0 || stopAttempts != 1 {
+		t.Fatalf("replacement ensures/cleanup attempts = %d/%d, want 0/1", ensureDelta, stopAttempts)
+	}
+}
+
+func TestPostResyncProxyLossRetainsIdentityUntilCleanupCompletes(t *testing.T) {
+	controller, fake := newControllerHarness(t)
+	installImages(
+		fake,
+		"provider:v1", "consumer:v1", "observer:v1",
+		"sha256:provider", "sha256:consumer", "sha256:observer",
+	)
+	initial := linkedSpec("provider:v1", "consumer:v1")
+	if err := controller.Up(context.Background(), initial); err != nil {
+		t.Fatal(err)
+	}
+	fake.startFailures["observer"] = []error{errors.New("interrupt target start")}
+	target := fanoutSpec("provider:v1", "consumer:v1", "observer:v1")
+	if err := controller.Up(context.Background(), target); err == nil ||
+		!strings.Contains(err.Error(), "interrupt target start") {
+		t.Fatalf("target Up error = %v", err)
+	}
+	interrupted := requireOperation(t, controller.State, target.Name)
+	proxyID := interrupted.Proxy.InstanceID
+	manager := controller.Proxy.(*fakeProxyManager)
+	manager.mu.Lock()
+	manager.inspectErrors = []error{proxy.ErrNotRunning}
+	manager.stopErrors = []error{errors.New("proxy cleanup is still in progress")}
+	ensuresBefore := manager.ensures
+	stopAttemptsBefore := manager.stopAttempts
+	manager.mu.Unlock()
+
+	err := controller.Resume(context.Background(), target.Name)
+	if err == nil || !strings.Contains(err.Error(), "proxy cleanup is still in progress") {
+		t.Fatalf("Resume error = %v, want incomplete cleanup", err)
+	}
+	operation := requireOperation(t, controller.State, target.Name)
+	if operation.Proxy == nil || operation.Proxy.InstanceID != proxyID {
+		t.Fatalf("post-resync proxy identity was discarded: %#v", operation.Proxy)
+	}
+	manager.mu.Lock()
+	ensureDelta := manager.ensures - ensuresBefore
+	stopAttempts := manager.stopAttempts - stopAttemptsBefore
+	manager.mu.Unlock()
+	if ensureDelta != 0 || stopAttempts != 1 {
+		t.Fatalf("replacement ensures/cleanup attempts = %d/%d, want 0/1", ensureDelta, stopAttempts)
+	}
+}
+
+func TestAbortReverseResyncRestoresWiringWithoutRestartingRetainedComponents(t *testing.T) {
+	controller, fake := newControllerHarness(t)
+	installImages(
+		fake,
+		"provider:v1", "consumer:v1", "observer:v1",
+		"sha256:provider", "sha256:consumer", "sha256:observer",
+	)
+	initial := linkedSpec("provider:v1", "consumer:v1")
+	if err := controller.Up(context.Background(), initial); err != nil {
+		t.Fatal(err)
+	}
+	previous := requireDesired(t, controller.State, initial.Name)
+	fake.startFailures["observer"] = []error{errors.New("interrupt target start")}
+	target := fanoutSpec("provider:v1", "consumer:v1", "observer:v1")
+	if err := controller.Up(context.Background(), target); err == nil ||
+		!strings.Contains(err.Error(), "interrupt target start") {
+		t.Fatalf("target Up error = %v", err)
+	}
+	operation := requireOperation(t, controller.State, target.Name)
+	proxyID := operation.Proxy.InstanceID
+	manager := controller.Proxy.(*fakeProxyManager)
+	manager.mu.Lock()
+	resyncsBefore := manager.resyncs
+	manager.mu.Unlock()
+	fake.resetCalls()
+
+	if err := controller.Abort(context.Background(), target.Name); err != nil {
+		t.Fatal(err)
+	}
+	deployed := requireDesired(t, controller.State, initial.Name)
+	if deployed.Proxy.InstanceID != proxyID {
+		t.Fatal("successful reverse resync replaced the proxy")
+	}
+	for _, name := range []string{"provider", "consumer"} {
+		requireSameContainer(t, deployed, name, previous.Containers[name].ID)
+		assertContainerUntouched(t, fake, previous.Containers[name].ID)
+	}
+	if _, exists := deployed.Containers["observer"]; exists {
+		t.Fatal("aborted observer remains in desired state")
+	}
+	manager.mu.Lock()
+	resyncsAfter, stops := manager.resyncs, manager.stops
+	manager.mu.Unlock()
+	if resyncsAfter-resyncsBefore != 1 || stops != 0 {
+		t.Fatalf("reverse resync delta/stops = %d/%d, want 1/0", resyncsAfter-resyncsBefore, stops)
+	}
+}
+
+func TestAbortIncompatibleProxyCapabilityIsTerminal(t *testing.T) {
+	controller, fake := newControllerHarness(t)
+	installImages(
+		fake,
+		"provider:v1", "consumer:v1", "observer:v1",
+		"sha256:provider", "sha256:consumer", "sha256:observer",
+	)
+	initial := linkedSpec("provider:v1", "consumer:v1")
+	if err := controller.Up(context.Background(), initial); err != nil {
+		t.Fatal(err)
+	}
+	fake.startFailures["observer"] = []error{errors.New("interrupt target start")}
+	target := fanoutSpec("provider:v1", "consumer:v1", "observer:v1")
+	if err := controller.Up(context.Background(), target); err == nil ||
+		!strings.Contains(err.Error(), "interrupt target start") {
+		t.Fatalf("target Up error = %v", err)
+	}
+	operation := requireOperation(t, controller.State, target.Name)
+	proxyID := operation.Proxy.InstanceID
+	manager := controller.Proxy.(*fakeProxyManager)
+	manager.mu.Lock()
+	manager.controlVersions[proxyID] = 0
+	attemptsBefore, stopsBefore := manager.resyncAttempts, manager.stops
+	manager.mu.Unlock()
+
+	err := controller.Abort(context.Background(), target.Name)
+	if !errors.Is(err, proxy.ErrControlProtocolMismatch) {
+		t.Fatalf("Abort error = %v, want ErrControlProtocolMismatch", err)
+	}
+	aborting := requireOperation(t, controller.State, target.Name)
+	if aborting.Proxy == nil || aborting.Proxy.InstanceID != proxyID {
+		t.Fatalf("abort changed incompatible proxy identity: %#v", aborting.Proxy)
+	}
+	if aborting.AbortRecreatePrevious {
+		t.Fatal("capability mismatch selected abort replacement fallback")
+	}
+	manager.mu.Lock()
+	attempts := manager.resyncAttempts - attemptsBefore
+	stops := manager.stops - stopsBefore
+	manager.mu.Unlock()
+	if attempts != 0 || stops != 0 {
+		t.Fatalf("abort capability mismatch attempts/stops = %d/%d, want 0/0", attempts, stops)
+	}
+}
+
+func TestRetargetedInputResyncsWithoutContainerOperations(t *testing.T) {
 	controller, fake := newControllerHarness(t)
 	installImages(
 		fake,
@@ -315,21 +820,21 @@ func TestRetargetedInputReplacesProxyAndSocketMountedComponents(t *testing.T) {
 		t.Fatal(err)
 	}
 	second := requireDesired(t, controller.State, retargeted.Name)
-	if second.Proxy.InstanceID == proxyID {
-		t.Fatal("retargeting retained the old proxy wiring")
+	if second.Proxy.InstanceID != proxyID {
+		t.Fatal("retargeting replaced the proxy process")
 	}
 	for name, oldID := range map[string]string{
 		"provider-a": providerAID,
 		"provider-b": providerBID,
 		"consumer":   consumerID,
 	} {
-		if second.Containers[name].ID == oldID {
-			t.Fatalf("retargeting retained %s with a stale socket mount", name)
+		if second.Containers[name].ID != oldID {
+			t.Fatalf("retargeting replaced unchanged %s", name)
 		}
+		assertContainerUntouched(t, fake, oldID)
 	}
-	request := requestsByComponent(fake.containerRequests)["consumer"]
-	if got, want := request.Environment["DCOMP_IN_UPSTREAM"], "unix:///run/dcomp/in/upstream"; got != want {
-		t.Fatalf("consumer upstream = %q, want %q", got, want)
+	if got := len(fake.containerRequests); got != 0 {
+		t.Fatalf("pure relink issued %d container creates", got)
 	}
 }
 
@@ -891,6 +1396,77 @@ func TestTargetedRestartTouchesOnlySelectedComponent(t *testing.T) {
 	}
 	if got := fake.mutationCalls(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("targeted restart mutations:\n got: %#v\nwant: %#v", got, want)
+	}
+}
+
+func TestRestartRequiresConvergedCommittedProxy(t *testing.T) {
+	tests := []struct {
+		name   string
+		ready  bool
+		digest string
+	}{
+		{name: "not ready without digest"},
+		{name: "not ready at committed digest", digest: "committed"},
+		{name: "ready at other digest", ready: true, digest: "other"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			controller, fake := newControllerHarness(t)
+			installImages(
+				fake,
+				"provider:v1", "consumer:v1",
+				"sha256:provider", "sha256:consumer",
+			)
+			spec := linkedSpec("provider:v1", "consumer:v1")
+			if err := controller.Up(context.Background(), spec); err != nil {
+				t.Fatal(err)
+			}
+			deployed := requireDesired(t, controller.State, spec.Name)
+			manager := controller.Proxy.(*fakeProxyManager)
+			manager.mu.Lock()
+			process := manager.processes[deployed.Proxy.InstanceID]
+			switch test.digest {
+			case "committed":
+				process.Digest = deployed.Proxy.Digest
+			default:
+				process.Digest = test.digest
+			}
+			manager.processes[deployed.Proxy.InstanceID] = process
+			manager.ready[deployed.Proxy.InstanceID] = test.ready
+			manager.mu.Unlock()
+			fake.resetCalls()
+
+			if err := controller.Restart(
+				context.Background(),
+				spec.Name,
+				"consumer",
+			); err == nil {
+				t.Fatal("restart succeeded with an unconverged proxy")
+			}
+			if got := fake.mutationCalls(); len(got) != 0 {
+				t.Fatalf("failed restart preflight performed mutations: %#v", got)
+			}
+			requireOperation(t, controller.State, spec.Name)
+
+			manager.mu.Lock()
+			process = manager.processes[deployed.Proxy.InstanceID]
+			process.Digest = deployed.Proxy.Digest
+			manager.processes[deployed.Proxy.InstanceID] = process
+			manager.ready[deployed.Proxy.InstanceID] = true
+			manager.mu.Unlock()
+			fake.resetCalls()
+			if err := controller.Resume(context.Background(), spec.Name); err != nil {
+				t.Fatal(err)
+			}
+			requireNoOperation(t, controller.State, spec.Name)
+			want := []engineCall{{
+				Method: "restart-container",
+				Target: deployed.Containers["consumer"].ID,
+			}}
+			if got := fake.mutationCalls(); !reflect.DeepEqual(got, want) {
+				t.Fatalf("resumed restart mutations:\n got: %#v\nwant: %#v", got, want)
+			}
+		})
 	}
 }
 

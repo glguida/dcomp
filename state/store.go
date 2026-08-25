@@ -3,6 +3,7 @@
 package state
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -20,9 +21,11 @@ import (
 	"github.com/glguida/dcomp/proxy"
 )
 
-const formatVersion = 3
-
-const engineBindingVersion = 1
+const (
+	formatVersion        = 4
+	engineBindingVersion = 2
+	documentSizeLimit    = 16 * 1024 * 1024
+)
 
 type Resource struct {
 	ID   string `json:"id"`
@@ -51,18 +54,23 @@ type EndpointCleanup struct {
 }
 
 type Operation struct {
-	Version     int                      `json:"version"`
-	ID          string                   `json:"id"`
-	Kind        string                   `json:"kind"`
-	Phase       string                   `json:"phase"`
-	Target      composition.ResolvedSpec `json:"target"`
-	RuntimeRoot string                   `json:"runtime_root"`
-	Proxy       *proxy.Process           `json:"proxy,omitempty"`
-	Previous    *Deployment              `json:"previous,omitempty"`
-	Networks    map[string]Resource      `json:"networks"`
-	Containers  map[string]Resource      `json:"containers"`
-	Components  []string                 `json:"components,omitempty"`
-	Completed   map[string]bool          `json:"completed,omitempty"`
+	Version            int                      `json:"version"`
+	ID                 string                   `json:"id"`
+	Kind               string                   `json:"kind"`
+	Phase              string                   `json:"phase"`
+	Target             composition.ResolvedSpec `json:"target"`
+	TargetWiring       proxy.Wiring             `json:"target_wiring,omitempty,omitzero"`
+	TargetWiringDigest string                   `json:"target_wiring_digest,omitempty"`
+	RuntimeRoot        string                   `json:"runtime_root"`
+	Proxy              *proxy.Process           `json:"proxy,omitempty"`
+	Previous           *Deployment              `json:"previous,omitempty"`
+	Networks           map[string]Resource      `json:"networks"`
+	Containers         map[string]Resource      `json:"containers"`
+	Components         []string                 `json:"components,omitempty"`
+	Completed          map[string]bool          `json:"completed,omitempty"`
+	// AbortRecreatePrevious records that reverse resync could not converge and
+	// abort must finish by applying the previous deployment as a fresh fleet.
+	AbortRecreatePrevious bool `json:"abort_recreate_previous,omitempty"`
 	// PendingCreates records a create request before it is sent to Docker and
 	// is cleared in the same durable update that records the returned object.
 	PendingCreates map[string]bool `json:"pending_creates,omitempty"`
@@ -84,7 +92,7 @@ func NewOperation(
 	if _, err := rand.Read(idBytes); err != nil {
 		return Operation{}, fmt.Errorf("generate operation ID: %w", err)
 	}
-	return Operation{
+	operation := Operation{
 		Version:          formatVersion,
 		ID:               hex.EncodeToString(idBytes),
 		Kind:             kind,
@@ -97,7 +105,21 @@ func NewOperation(
 		Completed:        make(map[string]bool),
 		PendingCreates:   make(map[string]bool),
 		EndpointCleanups: make(map[string]EndpointCleanup),
-	}, nil
+	}
+	if kind != "apply" {
+		return operation, nil
+	}
+	wiring, err := proxy.NewWiring(target)
+	if err != nil {
+		return Operation{}, fmt.Errorf("derive target proxy wiring: %w", err)
+	}
+	wiringDigest, err := wiring.Digest()
+	if err != nil {
+		return Operation{}, fmt.Errorf("digest target proxy wiring: %w", err)
+	}
+	operation.TargetWiring = wiring
+	operation.TargetWiringDigest = wiringDigest
+	return operation, nil
 }
 
 type engineBinding struct {
@@ -457,6 +479,9 @@ func validateDeployment(name string, deployment Deployment) error {
 	if err := deployment.Proxy.Validate(); err != nil {
 		return fmt.Errorf("desired state has invalid proxy record: %w", err)
 	}
+	if deployment.Proxy.Digest == "" {
+		return fmt.Errorf("desired state proxy has no wiring digest")
+	}
 	if deployment.Proxy.RuntimeDir != filepath.Join(deployment.RuntimeRoot, name) {
 		return fmt.Errorf("desired state proxy is outside its runtime root")
 	}
@@ -497,6 +522,32 @@ func validateOperation(name string, operation Operation) error {
 			return fmt.Errorf("previous deployment is invalid: %w", err)
 		}
 	}
+	if operation.Kind == "apply" && operation.TargetWiringDigest == "" {
+		return fmt.Errorf("apply operation has no target wiring digest")
+	}
+	if operation.TargetWiringDigest != "" {
+		digest, err := operation.TargetWiring.Digest()
+		if err != nil {
+			return fmt.Errorf("operation target wiring is invalid: %w", err)
+		}
+		if digest != operation.TargetWiringDigest {
+			return fmt.Errorf(
+				"operation target wiring digest mismatch: expected %s, found %s",
+				digest, operation.TargetWiringDigest,
+			)
+		}
+		expected, err := proxy.NewWiring(operation.Target)
+		if err != nil {
+			return fmt.Errorf("derive operation target wiring: %w", err)
+		}
+		expectedDigest, err := expected.Digest()
+		if err != nil {
+			return fmt.Errorf("digest operation target wiring: %w", err)
+		}
+		if expectedDigest != operation.TargetWiringDigest {
+			return fmt.Errorf("operation target wiring does not match its resolved system")
+		}
+	}
 	for endpointID, cleanup := range operation.EndpointCleanups {
 		if endpointID == "" || endpointID != cleanup.EndpointID ||
 			cleanup.ContainerID == "" ||
@@ -534,7 +585,18 @@ func (store Store) read(name, filename string, output interface{}) (bool, error)
 		return false, err
 	}
 	defer file.Close()
-	decoder := json.NewDecoder(io.LimitReader(file, 16*1024*1024))
+	data, err := io.ReadAll(io.LimitReader(file, documentSizeLimit+1))
+	if err != nil {
+		return false, fmt.Errorf("read %s: %w", filename, err)
+	}
+	if len(data) > documentSizeLimit {
+		return false, fmt.Errorf(
+			"decode %s: document exceeds %d bytes",
+			filename,
+			documentSizeLimit,
+		)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(output); err != nil {
 		return false, fmt.Errorf("decode %s: %w", filename, err)
@@ -550,6 +612,18 @@ func (store Store) write(name, filename string, value interface{}) (returnErr er
 	directory, err := store.directory(name)
 	if err != nil {
 		return err
+	}
+	encoded, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode %s: %w", filename, err)
+	}
+	encoded = append(encoded, '\n')
+	if len(encoded) > documentSizeLimit {
+		return fmt.Errorf(
+			"encode %s: document exceeds %d bytes",
+			filename,
+			documentSizeLimit,
+		)
 	}
 	if err := makeDirectoryDurable(directory, 0700); err != nil {
 		return fmt.Errorf("create state directory: %w", err)
@@ -568,10 +642,8 @@ func (store Store) write(name, filename string, value interface{}) (returnErr er
 	if err := temporary.Chmod(0600); err != nil {
 		return err
 	}
-	encoder := json.NewEncoder(temporary)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(value); err != nil {
-		return fmt.Errorf("encode %s: %w", filename, err)
+	if _, err := temporary.Write(encoded); err != nil {
+		return fmt.Errorf("write %s: %w", filename, err)
 	}
 	if err := temporary.Sync(); err != nil {
 		return fmt.Errorf("sync %s: %w", filename, err)

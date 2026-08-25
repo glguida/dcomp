@@ -439,7 +439,7 @@ func TestLogsCanReadFailedComponentOutput(t *testing.T) {
 	}
 }
 
-func TestLogsCanDiagnoseComponentBeforeStandardIOPolicyUpgrade(t *testing.T) {
+func TestLogsCanDiagnoseComponentWithNonconformingStandardIOPolicy(t *testing.T) {
 	controller, fake, deployment := deployLogFixture(t)
 	providerID := deployment.Containers["provider"].ID
 	fake.mu.Lock()
@@ -450,7 +450,7 @@ func TestLogsCanDiagnoseComponentBeforeStandardIOPolicyUpgrade(t *testing.T) {
 	fake.logLines[providerID] = []engine.LogLine{{
 		Timestamp: time.Now(),
 		Stream:    engine.LogStderr,
-		Message:   "upgrade diagnostic",
+		Message:   "policy diagnostic",
 	}}
 
 	var records []LogRecord
@@ -466,8 +466,8 @@ func TestLogsCanDiagnoseComponentBeforeStandardIOPolicyUpgrade(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if len(records) != 1 || records[0].Line.Message != "upgrade diagnostic" {
-		t.Fatalf("legacy component records = %#v", records)
+	if len(records) != 1 || records[0].Line.Message != "policy diagnostic" {
+		t.Fatalf("nonconforming component records = %#v", records)
 	}
 }
 

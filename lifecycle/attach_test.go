@@ -210,10 +210,10 @@ func TestAttachRejectsComponentWithoutCurrentStandardIOPolicy(t *testing.T) {
 		engine.AttachOptions{Stdout: io.Discard},
 	)
 	if err == nil || !strings.Contains(err.Error(), "standard I/O policy mismatch") {
-		t.Fatalf("legacy component attach error = %v", err)
+		t.Fatalf("nonconforming component attach error = %v", err)
 	}
 	if len(fake.attachCalls()) != 0 {
-		t.Fatal("engine attach was called for a legacy component")
+		t.Fatal("engine attach was called for a nonconforming component")
 	}
 }
 

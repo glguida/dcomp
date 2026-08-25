@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/glguida/dcomp/engine"
+	"github.com/glguida/dcomp/proxy"
 	"github.com/glguida/dcomp/state"
 )
 
@@ -275,6 +276,68 @@ func TestAbortInitialApplyClearsDesiredWrittenAtCommitBoundary(t *testing.T) {
 	}
 	requireNoDesired(t, controller.State, target.Name)
 	requireNoOperation(t, controller.State, target.Name)
+}
+
+func TestAbortFallbackDurablyHandsOffToResumablePreviousApply(t *testing.T) {
+	controller, fake := newControllerHarness(t)
+	installImages(
+		fake,
+		"provider:v1", "consumer:v1", "observer:v1",
+		"sha256:provider", "sha256:consumer", "sha256:observer",
+	)
+	initial := linkedSpec("provider:v1", "consumer:v1")
+	if err := controller.Up(context.Background(), initial); err != nil {
+		t.Fatal(err)
+	}
+	previous := requireDesired(t, controller.State, initial.Name)
+
+	// Land the target wiring and containers, but interrupt the target apply
+	// before commit so abort has target-owned work to remove.
+	target := fanoutSpec("provider:v1", "consumer:v1", "observer:v1")
+	fake.startFailures["observer"] = []error{errors.New("interrupt target start")}
+	if err := controller.Up(context.Background(), target); err == nil ||
+		!strings.Contains(err.Error(), "interrupt target start") {
+		t.Fatalf("target Up error = %v", err)
+	}
+	interrupted := requireOperation(t, controller.State, target.Name)
+	if interrupted.Phase != phaseStart {
+		t.Fatalf("interrupted phase = %q, want %q", interrupted.Phase, phaseStart)
+	}
+
+	// Make reverse resync fail so abort chooses full replacement, then fail the
+	// first start in that replacement. The replacement apply journal must
+	// already be durable when Abort returns the injected error.
+	manager := controller.Proxy.(*fakeProxyManager)
+	manager.beforeResync = func(proxy.Wiring) error {
+		return errors.New("forced reverse resync failure")
+	}
+	fake.startFailures["provider"] = []error{errors.New("interrupt previous recreation")}
+	err := controller.Abort(context.Background(), target.Name)
+	if err == nil || !strings.Contains(err.Error(), "interrupt previous recreation") {
+		t.Fatalf("Abort error = %v", err)
+	}
+	replacement := requireOperation(t, controller.State, initial.Name)
+	if replacement.Kind != kindApply || replacement.Phase != phaseStart {
+		t.Fatalf(
+			"replacement operation = kind %q phase %q, want apply/start",
+			replacement.Kind,
+			replacement.Phase,
+		)
+	}
+	if replacement.Target.Digest != previous.Spec.Digest ||
+		replacement.RuntimeRoot != previous.RuntimeRoot {
+		t.Fatalf("replacement operation does not target previous deployment: %#v", replacement)
+	}
+
+	manager.beforeResync = nil
+	if err := controller.Resume(context.Background(), initial.Name); err != nil {
+		t.Fatal(err)
+	}
+	deployed := requireDesired(t, controller.State, initial.Name)
+	if deployed.Spec.Digest != previous.Spec.Digest {
+		t.Fatalf("resumed deployment digest = %q, want %q", deployed.Spec.Digest, previous.Spec.Digest)
+	}
+	requireNoOperation(t, controller.State, initial.Name)
 }
 
 type failFirstNetworkCreate struct {
