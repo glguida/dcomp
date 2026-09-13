@@ -3,6 +3,36 @@
 DComp deliberately reuses existing standards where they fit and stays smaller
 than systems solving broader problems.
 
+## Module interconnection languages
+
+[DeRemer and Kron](https://doi.org/10.1109/TSE.1976.233534) distinguished
+programming-in-the-large — the composition of independently written modules —
+from programming-in-the-small, and argued that composition needs its own
+language. Architecture description languages such as
+[Darwin](https://doi.org/10.1007/3-540-60406-5_12),
+[Wright](https://doi.org/10.1145/258077.258078), UniCon, and Acme later
+described systems as components with typed provided and required interfaces
+and explicit bindings; Darwin additionally specified dynamic reconfiguration
+of running systems.
+
+`system.dcomp` is a language in this tradition: named instances, nominally
+typed endpoints, explicit links, and incremental addition, removal, and
+relinking of components in a running system. Two departures define DComp
+against these languages:
+
+- The description executes. Classic architecture descriptions were documents
+  beside the system, and implementations drifted from them because nothing
+  enforced the declared boundaries. A DComp system runs only by applying its
+  description, links are validated before start, and per-component socket
+  mounts leave a component no route to other components except its declared
+  endpoints. Divergence between the recorded architecture and the running
+  system is not observed and corrected; it is prevented, because architecture
+  change is itself a journaled lifecycle operation.
+- Checking is nominal. Wright specified behavioral protocols and verified
+  interaction compatibility; DComp matches fully qualified service names
+  before start and leaves payloads and behavior to the linked components, as
+  application contracts owned by their projects.
+
 ## Docker Compose
 
 [Docker Compose](https://docs.docker.com/compose/) defines multi-container
@@ -119,4 +149,7 @@ The useful existing pieces are already standardized:
 DComp remains a thin system and lifecycle layer over those facilities. It adds
 one bounded per-system data-plane process and a typed interface namespace
 within each system. It has no host-wide registry, global daemon, sidecar, or
-image-build system.
+image-build system. Within that scope it functions as a module
+interconnection language whose descriptions are also the deployment
+mechanism: the property that keeps a recorded architecture under direct
+control, aligned with the system actually running.

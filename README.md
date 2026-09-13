@@ -5,6 +5,17 @@
 DComp runs declarative, single-host systems of Docker components. A system
 names component instances and links their typed input and output endpoints.
 
+DComp separates programming in the large from programming in the small. The
+system description is the architecture: named instances and typed, explicitly
+linked endpoints. Components are the implementation: ordinary OCI images
+speaking their own protocols over connected byte streams.
+
+The architecture is under direct control. A system runs only by applying its
+description. A component reaches other components only through its declared
+endpoints, and external reach — binds, published ports, egress — is explicit
+policy in the same description. Every change is a recorded lifecycle
+operation, so the description and the running system cannot silently diverge.
+
 DComp routes every application interface through one small
 `dcomp-proxy` process per running system. The proxy owns the Unix domain
 sockets; components are clients that only call `connect()`. DComp bind-mounts
