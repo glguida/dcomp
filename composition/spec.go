@@ -77,11 +77,12 @@ type Runtime struct {
 	ExternalEgress bool            `json:"external_egress,omitempty"`
 }
 
-// Spec is a user-written system: component instances and direct endpoint links.
+// Spec describes component instances, typed globals, and direct or symbolic links.
 type Spec struct {
 	Name       string     `json:"name"`
 	Components []Instance `json:"components"`
 	Links      []Link     `json:"links"`
+	Globals    []Global   `json:"globals,omitempty"`
 }
 
 // Instance gives a reusable component definition a system-local name.
@@ -93,13 +94,16 @@ type Instance struct {
 	Runtime   Runtime   `json:"runtime"`
 }
 
-// EndpointRef identifies one endpoint on one component instance.
+// EndpointRef identifies a concrete component endpoint or a symbolic global.
+// A global reference sets only Global; a concrete reference sets Component
+// and Endpoint.
 type EndpointRef struct {
 	Component string `json:"component"`
 	Endpoint  string `json:"endpoint"`
+	Global    string `json:"global,omitempty"`
 }
 
-// Link binds one input endpoint directly to one output endpoint.
+// Link binds one concrete input to a concrete output or a symbolic global.
 type Link struct {
 	Input  EndpointRef `json:"input"`
 	Output EndpointRef `json:"output"`
@@ -124,7 +128,7 @@ type ResolvedComponent struct {
 }
 
 // ResolvedSpec is the canonical runtime description of a system. Digest covers
-// immutable image IDs, definitions, normalized runtime policy, and links.
+// immutable image IDs, definitions, normalized runtime policy, globals, and links.
 // Descriptor paths remain metadata; canonical bind source paths are runtime
 // identity.
 type ResolvedSpec struct {
@@ -132,6 +136,7 @@ type ResolvedSpec struct {
 	Digest     string              `json:"digest"`
 	Components []ResolvedComponent `json:"components"`
 	Links      []Link              `json:"links"`
+	Globals    []Global            `json:"globals,omitempty"`
 }
 
 // ValidName reports whether name is valid for a system, instance, or endpoint.
@@ -256,14 +261,11 @@ func ValidateDefinition(definition Definition) error {
 	return nil
 }
 
-// Validate verifies the complete direct-link graph. Every input must be bound
-// exactly once. Outputs may fan out, and cycles are valid.
+// Validate verifies the composition and global namespace. Inputs have at most
+// one target. Outputs may fan out, and cycles are valid.
 func Validate(spec Spec) error {
 	if !ValidName(spec.Name) {
 		return fmt.Errorf("invalid system name %q", spec.Name)
-	}
-	if len(spec.Components) == 0 {
-		return fmt.Errorf("system %q has no components", spec.Name)
 	}
 
 	components := make(map[string]Instance, len(spec.Components))
@@ -319,56 +321,48 @@ func Validate(spec Spec) error {
 		}
 	}
 
+	globals, err := validateGlobals(spec.Globals, components)
+	if err != nil {
+		return err
+	}
 	bound := make(map[string]struct{}, len(spec.Links))
 	for _, link := range spec.Links {
-		inputComponent, exists := components[link.Input.Component]
+		if link.Input.Global != "" {
+			return fmt.Errorf("link input must be a direct endpoint")
+		}
+		consumer, exists := components[link.Input.Component]
 		if !exists {
 			return fmt.Errorf("link input component %q is not declared", link.Input.Component)
 		}
-		input, exists := inputComponent.Component.Definition.Input(link.Input.Endpoint)
+		input, exists := consumer.Component.Definition.Input(link.Input.Endpoint)
 		if !exists {
-			return fmt.Errorf(
-				"component %q has no input endpoint %q",
-				link.Input.Component, link.Input.Endpoint,
-			)
+			return fmt.Errorf("component %q has no input endpoint %q", link.Input.Component, link.Input.Endpoint)
 		}
-
-		outputComponent, exists := components[link.Output.Component]
-		if !exists {
-			return fmt.Errorf("link output component %q is not declared", link.Output.Component)
+		var service string
+		if link.Output.Global != "" {
+			if link.Output.Component != "" || link.Output.Endpoint != "" {
+				return fmt.Errorf("link target mixes global and direct references")
+			}
+			global, exists := globals[link.Output.Global]
+			if !exists {
+				return fmt.Errorf("global interface %q is not declared", link.Output.Global)
+			}
+			service = global.Service
+		} else {
+			output, err := directOutput(components, link.Output)
+			if err != nil {
+				return err
+			}
+			service = output.Service
 		}
-		output, exists := outputComponent.Component.Definition.Output(link.Output.Endpoint)
-		if !exists {
-			return fmt.Errorf(
-				"component %q has no output endpoint %q",
-				link.Output.Component, link.Output.Endpoint,
-			)
+		if input.Service != service {
+			return fmt.Errorf("%s expects %s, but %s provides %s", link.Input, input.Service, link.Output, service)
 		}
-		if input.Service != output.Service {
-			return fmt.Errorf(
-				"%s.%s expects %s, but %s.%s provides %s",
-				link.Input.Component, link.Input.Endpoint, input.Service,
-				link.Output.Component, link.Output.Endpoint, output.Service,
-			)
-		}
-
 		key := endpointKey(link.Input)
 		if _, exists := bound[key]; exists {
-			return fmt.Errorf(
-				"input %s.%s is linked more than once",
-				link.Input.Component, link.Input.Endpoint,
-			)
+			return fmt.Errorf("input %s is linked more than once", link.Input)
 		}
 		bound[key] = struct{}{}
-	}
-
-	for _, instance := range spec.Components {
-		for _, input := range instance.Component.Definition.Inputs {
-			ref := EndpointRef{Component: instance.Name, Endpoint: input.Name}
-			if _, exists := bound[endpointKey(ref)]; !exists {
-				return fmt.Errorf("input %s.%s is not linked", instance.Name, input.Name)
-			}
-		}
 	}
 	return nil
 }
@@ -381,8 +375,9 @@ func Resolve(spec Spec, images map[string]ResolvedImage) (ResolvedSpec, error) {
 	}
 
 	resolved := ResolvedSpec{
-		Name:  spec.Name,
-		Links: append([]Link(nil), spec.Links...),
+		Name:    spec.Name,
+		Links:   append([]Link(nil), spec.Links...),
+		Globals: append([]Global(nil), spec.Globals...),
 	}
 	for _, instance := range spec.Components {
 		image, ok := images[instance.Name]
@@ -424,6 +419,7 @@ func Resolve(spec Spec, images map[string]ResolvedImage) (ResolvedSpec, error) {
 }
 
 func (spec *ResolvedSpec) canonicalize() {
+	sort.Slice(spec.Globals, func(i, j int) bool { return spec.Globals[i].Name < spec.Globals[j].Name })
 	for index := range spec.Components {
 		canonicalizeDefinition(&spec.Components[index].Definition)
 		canonicalizeRuntime(&spec.Components[index].Runtime)
@@ -566,11 +562,12 @@ func (spec ResolvedSpec) LinkTarget(
 		if link.Input.Component != inputComponent || link.Input.Endpoint != inputEndpoint {
 			continue
 		}
-		component, exists := spec.Component(link.Output.Component)
+		target := ResolveTarget(spec.Globals, link.Output)
+		component, exists := spec.Component(target.Component)
 		if !exists {
 			return ResolvedComponent{}, Endpoint{}, false
 		}
-		endpoint, exists := component.Definition.Output(link.Output.Endpoint)
+		endpoint, exists := component.Definition.Output(target.Endpoint)
 		if !exists {
 			return ResolvedComponent{}, Endpoint{}, false
 		}

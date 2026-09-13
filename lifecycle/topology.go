@@ -129,14 +129,6 @@ func componentEnvironment(
 		"DCOMP_COMPONENT_NAME": component.Name,
 	}
 	for _, input := range component.Definition.Inputs {
-		_, _, linked := spec.LinkTarget(component.Name, input.Name)
-		if !linked {
-			return nil, fmt.Errorf(
-				"%s.%s has no resolved link",
-				component.Name,
-				input.Name,
-			)
-		}
 		environment[runtimecontract.InputEnvironment(input.Name)] =
 			runtimecontract.InputURI(input.Name)
 	}

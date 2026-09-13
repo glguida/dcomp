@@ -13,6 +13,7 @@ import (
 	"github.com/glguida/dcomp/proxy"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/peer"
 )
 
 func TestGRPCComponentServesThroughClientOnlyProxyConnection(t *testing.T) {
@@ -75,7 +76,17 @@ func TestGRPCComponentServesThroughClientOnlyProxyConnection(t *testing.T) {
 		"DCOMP_OUT_ECHO",
 		"unix://"+proxy.HostSocket(config.RuntimeDir, proxy.DirectionOutput, "provider", "echo"),
 	)
-	server, err := component.NewServer(component.WithOutput("echo"))
+	server, err := component.NewServer(component.WithOutput("echo"),
+		component.WithGRPCOptions(grpc.UnaryInterceptor(func(
+			ctx context.Context, request interface{}, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler,
+		) (interface{}, error) {
+			origin, ok := peer.FromContext(ctx)
+			if !ok || origin.Addr.Network() != "dcomp" || origin.Addr.String() != "consumer.upstream" {
+				t.Errorf("unexpected RPC peer: %#v", origin)
+			}
+			return handler(ctx, request)
+		})),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

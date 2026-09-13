@@ -117,5 +117,6 @@ The useful existing pieces are already standardized:
 - ordinary project files supply component and system configuration.
 
 DComp remains a thin system and lifecycle layer over those facilities. It adds
-one bounded per-system data-plane process, but no global daemon, registry,
-sidecar, or image-build system.
+one bounded per-system data-plane process and a typed interface namespace
+within each system. It has no host-wide registry, global daemon, sidecar, or
+image-build system.

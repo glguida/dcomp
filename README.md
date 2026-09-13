@@ -1,11 +1,11 @@
-<img src="docs/assets/banner.svg" alt="dcomp — Components, wired by hand. A Docker component substrate. V0.2.1, MIT, Linux, Docker Engine 25+." width="100%">
+<img src="docs/assets/banner.svg" alt="dcomp — Components, wired by hand. A Docker component substrate. V0.3.0, MIT, Linux, Docker Engine 25+." width="100%">
 
 # DComp
 
 DComp runs declarative, single-host systems of Docker components. A system
 names component instances and links their typed input and output endpoints.
 
-Version 0.2 routes every application interface through one small
+DComp routes every application interface through one small
 `dcomp-proxy` process per running system. The proxy owns the Unix domain
 sockets; components are clients that only call `connect()`. DComp bind-mounts
 each container's own sockets individually and read-only, so a component cannot
@@ -18,8 +18,8 @@ single-host, and intentionally has no cluster control plane.
 ## Description files
 
 A `component.dcomp` declares an existing image and its locally named
-interfaces. A `system.dcomp` creates instances and links every input to one
-compatible output:
+interfaces. A `system.dcomp` creates instances and links inputs to compatible
+outputs, directly or through system-global interface names:
 
 ```text
 # components/filter/component.dcomp
@@ -40,6 +40,63 @@ binds, persistent volumes, arguments, published non-DComp ports, and egress.
 See the [CLI and description-file reference](docs/reference.md) for the exact
 grammar, path rules, validation, and command behavior.
 
+## Incremental composition and global interfaces
+
+Independent programs can add and remove their own component instances in one
+running system. A global name identifies one typed output interface, within
+that system. `@provider_endpoint` follows reassignment; `provider.api` always
+names that specific component output. Globals cannot point to other globals.
+
+```text
+# system.dcomp
+system agents
+component provider components/provider
+component team components/team
+global provider_endpoint example.Provider provider.api
+link team.inference @provider_endpoint
+```
+
+A global can be declared unbound by omitting its target. Unconnected inputs and
+empty systems are valid. An input with no route, or a global target that is
+unbound, closes connections immediately rather than queuing for a provider.
+
+```sh
+# Add the first component; creates the system when absent.
+dcomp add-component agents provider components/provider
+dcomp assign-global agents provider_endpoint provider.api
+# Consumers keep a symbolic reference to the global name.
+dcomp add-component --link inference=@provider_endpoint agents team components/team
+# Insert a wrapper, binding its upstream directly to the previous endpoint.
+dcomp add-component --link upstream=provider.api agents wrapper components/wrapper
+dcomp assign-global agents provider_endpoint wrapper.api
+# Removing the wrapper unbinds the name; team stays linked to it.
+dcomp rm-component agents wrapper
+# Restore service without editing the team's wire.
+dcomp assign-global agents provider_endpoint provider.api
+```
+
+`mod-wire SYSTEM COMPONENT.INPUT COMPONENT.OUTPUT|@GLOBAL|-` replaces one wire
+or disconnects it with `-`. `assign-global SYSTEM NAME -` unbinds a name. To
+create an initially unbound name use `assign-global --service TYPE SYSTEM NAME -`.
+Existing names retain their service type when reassigned.
+
+Incremental commands wait for the system lock, read committed state, and apply
+one change through the durable lifecycle journal. Existing images are pinned
+to their recorded IDs. Interrupted operations must be resumed or aborted before
+another incremental edit. The Go `lifecycle.Controller` exposes the same
+operations and an `Edit` callback for a batch of composition changes applied
+as one recoverable operation. Docker changes are not an atomic transaction;
+an interrupted apply requires `resume` or `abort`.
+
+Reassignment disconnects streams whose concrete route changed; subsequent
+connections use the new output. Unaffected streams and endpoint socket inodes
+survive. Removing a component drops its direct wires, unbinds its global
+exports, and retains other components and persistent volumes. The last
+component may be removed without discarding the global namespace.
+
+See [the reference](docs/reference.md) for command options and the proxy's
+incremental control messages.
+
 ## Component contract
 
 At runtime DComp injects one address per declared endpoint:
@@ -51,11 +108,12 @@ DCOMP_OUT_FILTERED=unix:///run/dcomp/out/filtered
 
 Environment names use the endpoint name in uppercase with `-` converted to
 `_`. For every input and output, the component connects to the supplied Unix
-socket and speaks its application protocol on the resulting stream.
+socket. On outputs, the SDK consumes the proxy's connection-origin header;
+the application then speaks its protocol on the resulting stream.
 
 Components must not bind or listen on these interface paths. The removed
 0.1 contract—`DCOMP_LINK_*`, Docker DNS, and fixed port `50051`—is not
-supported by 0.2 components.
+supported by 0.3.0 components.
 
 The repository ships helpers for Go/gRPC, dependency-free
 [Python](sdk/python/README.md), and dependency-free
@@ -202,10 +260,30 @@ proxy never rebinds a surviving endpoint identity, so Docker's per-file socket
 mounts retain the same inode and established streams on surviving links remain
 open.
 
-## Migration from 0.2.0
+## Migration to 0.3.0
 
-The component addresses and wire contract are unchanged, so existing 0.2
-component images and SDKs remain valid. Host state and live proxies are not
+Before upgrading, use the old binary to run `dcomp down NAME` for each system.
+Install the matching 0.3.0 CLI and proxy, then apply the systems again. Named
+volumes and the state-root namespace are preserved; do not delete the state
+root. Durable state format 5 is written by 0.3.0; format 4 remains readable.
+Older binaries reject format 5. Proxy configuration/status format 4 and control
+protocol 2 require a matching proxy; an older live proxy is rejected before
+mutation.
+
+The component stream contract is unchanged from 0.2.2. When upgrading from
+0.2.1, rebuild output components with the current SDK: the proxy now sends
+`DCOMP/1 component.input\n` before output application bytes, and SDK adapters
+consume it. Input clients and application payloads are unchanged.
+
+Existing direct-link system files continue to work. `up` remains an authoritative
+whole-system apply; incremental commands modify the recorded system without
+requiring or rewriting its source file.
+
+## Migration from 0.2.0 to 0.2.1
+
+In this earlier upgrade, the component addresses and wire contract were
+unchanged, so existing 0.2 component images and SDKs remained valid. Host state
+and live proxies are not
 upgrade-compatible: DComp 0.2.1 rejects 0.2.0 durable state, engine bindings,
 proxy configurations, and control protocols without mutating them.
 
@@ -217,7 +295,8 @@ usual. A 0.2.0 system left running must be shut down with the 0.2.0 binary.
 
 ## Migration from 0.1.x
 
-0.2 is wire-incompatible with 0.1 components.
+The 0.1-to-0.2 migration changed the component wire contract as follows. For
+upgrading to the current release, also follow [Migration to 0.3.0](#migration-to-030).
 
 1. Run `dcomp down NAME` with the 0.1 binary before upgrading. Version 0.2
    rejects the old durable-state format instead of guessing ownership.
@@ -230,12 +309,13 @@ usual. A 0.2.0 system left running must be shut down with the 0.2.0 binary.
 5. Update health checks that assumed local TCP port `50051`.
 6. Install `dcomp-proxy` beside the `dcomp` executable.
 
-The `system.dcomp` and `component.dcomp` grammars themselves are unchanged.
+That migration kept the `system.dcomp` and `component.dcomp` grammars unchanged.
+Version 0.3 adds optional global declarations and symbolic link targets.
 Per-link Docker bridges and `DCOMP_LINK_*` are removed completely.
 
 ## Deliberate limits
 
-DComp 0.2 provides no multi-host overlay, replicas, automatic failover,
+DComp 0.3.0 provides no multi-host overlay, replicas, automatic failover,
 encryption, arbitrary Docker option passthrough, secret store, image build/pull
 workflow, or long-lived control-plane daemon. Unix
 socket permissions are the local trust boundary; optional peer-credential

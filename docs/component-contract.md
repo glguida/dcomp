@@ -1,6 +1,6 @@
 # Component contract
 
-This document defines the DComp 0.2 image and process contract. It is
+This document defines the DComp 0.3.0 image and process contract. It is
 wire-incompatible with 0.1.x.
 
 ## Descriptor
@@ -67,7 +67,8 @@ the proxy rather than binding a local address.
 ## Connection behavior
 
 The proxy pairs one input connection with one connection from the linked
-output. It forwards an opaque, ordered byte stream in both directions.
+output. It sends the connection-origin header to the output, then forwards an
+opaque, ordered application byte stream in both directions.
 
 Components MUST treat connection loss as reconnectable. Consumers MUST retry
 failed connects with bounded backoff. Producers MUST detect dying dialed
@@ -79,6 +80,36 @@ has exactly one lifetime connection.
 
 DComp does not prescribe deadlines, request framing, retry semantics, or
 application-level health. Those belong to the selected protocol.
+
+### Connection origin
+
+Upon pairing, the proxy writes exactly one ASCII header to the output stream:
+
+```text
+DCOMP/1 <component>.<input-endpoint>\n
+```
+
+Here `\n` denotes a single LF byte, not two literal characters. Both names
+follow the ordinary DComp name grammar, `[a-z][a-z0-9-]{0,62}`. The existing
+63-byte name limits bound the complete header to 136 bytes, including its
+prefix and LF. There is no header on the input stream.
+
+The origin identifies the immediate consumer component instance and its input
+endpoint in this system. The proxy derives it from the socket's configured
+wiring, never from consumer-supplied bytes. It is not an end-user identity or
+a propagated identity from earlier calls. Components may use it for access
+checks or ignore it. Its trust depends on DComp's socket-mount isolation;
+host operators with access to those sockets can impersonate a component.
+
+Output SDK adapters consume and validate the header before handing the socket
+to application code. An invalid, oversized, or incomplete header is discarded
+with its connection, and acquisition retries. Adapters do not guess whether an
+older raw stream is a header. Custom raw-output adapters must implement the
+same framing and must leave all subsequent bytes untouched.
+
+The header arrives as soon as a consumer is paired, even before it sends any
+application data. Both client-first and server-first protocols are supported.
+The header is excluded from application byte metrics.
 
 ## Language helpers
 
@@ -99,10 +130,17 @@ same kind of claimed sockets, while `serveOutput()` injects them into a native
 These helpers do not define an application protocol or depend on protobuf,
 gRPC, ConnectRPC, or Cyclo. Framework-specific packages remain free to layer
 their own health, reflection, routing, and graceful-shutdown behavior on top.
-The listener-style adapters wait for the consumer's first byte and are
-therefore intended for client-first protocols such as HTTP and gRPC.
-Server-first protocols can use the raw `connect_output()`/`connectOutput()`
-helpers and manage their connection pool explicitly.
+The listener-style adapters wait for the proxy's origin header, not an
+application byte. Python's `accept()` returns `(socket, "component.endpoint")`.
+Node sockets yielded by `outputConnections()` or passed to `serveOutput()`
+have a read-only `origin` string property; HTTP handlers can read
+`request.socket.origin`. Go's `component.Server` exposes the origin through
+the standard gRPC `peer.FromContext(ctx)`: `peer.Addr.String()` is the identity
+and `peer.Addr.Network()` is `"dcomp"`. Caller-supplied `ServeListener`
+listeners retain their own peer-address semantics.
+
+The raw `connect_output()`/`connectOutput()` helpers do not consume the header.
+Prefer the listener-style adapters unless implementing the transport contract.
 
 See the complete [Python helper guide](../sdk/python/README.md) and
 [Node.js helper guide](../sdk/node/README.md) for raw connections, framework
@@ -139,8 +177,8 @@ if err := server.Serve(ctx); err != nil {
 }
 ```
 
-`Server` connects to the output Unix socket, waits for a consumer's gRPC
-preface, and presents the resulting connection to `grpc.Server`. It includes
+`Server` connects to the output Unix socket, waits for the proxy's connection-origin
+header, and presents the resulting connection to `grpc.Server`. It includes
 standard gRPC health and reflection services and performs bounded graceful
 shutdown. Multiple `WithOutput` options are supported, although every
 registered gRPC service is then available on each configured output.
@@ -247,7 +285,7 @@ reconnect normally.
 
 ## Removed 0.1 contract
 
-The following behavior is invalid in 0.2:
+The following behavior is invalid:
 
 ```text
 DCOMP_LINK_UPSTREAM=dns:///provider:50051
@@ -256,4 +294,4 @@ listen 0.0.0.0:50051
 
 There are no `DCOMP_LINK_*` variables, fixed interface ports, per-link Docker
 bridges, or direct Docker-DNS application calls. Components using any of those
-assumptions must be rebuilt for 0.2.
+assumptions must be rebuilt for 0.3.0.

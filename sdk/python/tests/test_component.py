@@ -101,7 +101,7 @@ class ConnectionTests(unittest.TestCase):
         peer.sendall(b"response")
         self.assertEqual(client.recv(8), b"response")
 
-    def test_dial_listener_waits_for_and_preserves_first_byte(self) -> None:
+    def test_dial_listener_consumes_origin_and_preserves_application_bytes(self) -> None:
         path = self.socket_path("output.sock")
         proxy = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.addCleanup(proxy.close)
@@ -128,14 +128,14 @@ class ConnectionTests(unittest.TestCase):
         time.sleep(0.05)
         self.assertTrue(thread.is_alive(), "unclaimed output was returned")
 
-        producer.sendall(b"request")
+        producer.sendall(b"DCOMP/1 consumer.upstream\nrequest")
         thread.join(timeout=2)
         self.assertFalse(thread.is_alive(), "claimed output was not returned")
         self.assertEqual(len(accepted), 1)
         self.assertIsInstance(accepted[0], tuple)
         connection, address = accepted[0]  # type: ignore[misc]
         self.addCleanup(connection.close)
-        self.assertEqual(address, "")
+        self.assertEqual(address, "consumer.upstream")
         self.assertEqual(connection.recv(7), b"request")
         connection.sendall(b"response")
         self.assertEqual(producer.recv(8), b"response")
@@ -159,7 +159,7 @@ class ConnectionTests(unittest.TestCase):
         abandoned.close()
         claimed, _address = proxy.accept()
         self.addCleanup(claimed.close)
-        claimed.sendall(b"x")
+        claimed.sendall(b"DCOMP/1 consumer.upstream\nx")
 
         thread.join(timeout=2)
         self.assertFalse(thread.is_alive())
@@ -184,12 +184,49 @@ class ConnectionTests(unittest.TestCase):
         proxy.listen()
         claimed, _address = proxy.accept()
         self.addCleanup(claimed.close)
-        claimed.sendall(b"x")
+        claimed.sendall(b"DCOMP/1 consumer.upstream\nx")
 
         thread.join(timeout=2)
         self.assertFalse(thread.is_alive())
         self.assertEqual(result[0][0].recv(1), b"x")
         result[0][0].close()
+
+    def test_fragmented_origin_accepts_server_first_after_rejecting_bad_headers(self) -> None:
+        path = self.socket_path("headers.sock")
+        proxy = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(proxy.close)
+        proxy.bind(path)
+        proxy.listen()
+        proxy.settimeout(2)
+        listener = DialListener("result", environ={"DCOMP_OUT_RESULT": f"unix://{path}"})
+        self.addCleanup(listener.close)
+        result = []
+        thread = threading.Thread(target=lambda: result.append(listener.accept()), daemon=True)
+        thread.start()
+        for header in (
+            b"DCOMP/1 partial",
+            b"DCOMP/2 a.b\n",
+            b"DCOMP/1 a.b.c\n",
+            b"DCOMP/1 a.\xff\n",
+            b"x" * 136,
+            b"DCOMP/1 " + b"a" * 64 + b".b\n",
+        ):
+            connection, _ = proxy.accept()
+            with connection:
+                connection.sendall(header)
+        claimed, _ = proxy.accept()
+        self.addCleanup(claimed.close)
+        claimed.sendall(b"DCOMP/1 " + b"a" * 63 + b".")
+        time.sleep(0.15)  # The partial header must survive a socket read timeout.
+        self.assertTrue(thread.is_alive())
+        claimed.sendall(b"b" * 63 + b"\n")
+        thread.join(timeout=2)
+        self.assertFalse(thread.is_alive(), "accept waited for application bytes")
+        connection, origin = result[0]
+        self.addCleanup(connection.close)
+        self.assertEqual(origin, "a" * 63 + "." + "b" * 63)
+        connection.sendall(b"hello")
+        self.assertEqual(claimed.recv(5), b"hello")
 
     def test_close_wakes_accept(self) -> None:
         path = self.socket_path("close.sock")
@@ -214,6 +251,7 @@ class ConnectionTests(unittest.TestCase):
         thread.start()
         pending, _address = proxy.accept()
         self.addCleanup(pending.close)
+        pending.sendall(b"DCOMP/1 partial")
         listener.close()
         thread.join(timeout=2)
         self.assertFalse(thread.is_alive())

@@ -67,6 +67,7 @@ examples:
 
 integration: build examples
 	tools/integration-test
+	tools/incremental-test
 
 install:
 	@test -x bin/dcomp && test -x bin/dcomp-proxy && test -x bin/dcomp-healthcheck || { \

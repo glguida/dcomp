@@ -112,6 +112,19 @@ aside h2 em { color: var(--blu); font-style: normal; }
   margin-bottom: 16px;
 }
 .descriptor .accent { color: var(--rosso); }
+.global-name {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  text-align: left;
+  overflow-wrap: anywhere;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.global-name:hover, .global-name[aria-pressed="true"] { color: var(--rosso); }
+.global-name:focus-visible { outline: 2px solid var(--rosso); outline-offset: 2px; }
 .rule { border-top: 1px solid var(--ink-30); margin: 14px 0; }
 .legend {
   font-size: 11px;

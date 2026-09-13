@@ -93,7 +93,8 @@ func LoadComponent(path string) (Component, error) {
 //	args INSTANCE ARG...
 //	publish INSTANCE tcp|udp HOST_IP HOST_PORT CONTAINER_PORT
 //	egress INSTANCE
-//	link INSTANCE.INPUT INSTANCE.OUTPUT
+//	global NAME SERVICE [INSTANCE.OUTPUT]
+//	link INSTANCE.INPUT INSTANCE.OUTPUT|@GLOBAL
 //
 // Relative component and bind source paths are resolved from baseDir. Bind
 // sources must exist and are stored as canonical absolute paths. Component
@@ -258,6 +259,19 @@ func Parse(reader io.Reader, baseDir string) (Spec, error) {
 				)
 			}
 			runtime.ExternalEgress = true
+		case "global":
+			if len(fields) != 3 && len(fields) != 4 {
+				return Spec{}, lineError(lineNumber, "global expects NAME SERVICE [COMPONENT.OUTPUT]")
+			}
+			global := Global{Name: fields[1], Service: fields[2]}
+			if len(fields) == 4 {
+				target, err := ParseEndpointRef(fields[3])
+				if err != nil {
+					return Spec{}, lineError(lineNumber, "%v", err)
+				}
+				global.Target = target
+			}
+			spec.Globals = append(spec.Globals, global)
 		case "link":
 			if len(fields) != 3 {
 				return Spec{}, lineError(
@@ -268,7 +282,7 @@ func Parse(reader io.Reader, baseDir string) (Spec, error) {
 			if err != nil {
 				return Spec{}, lineError(lineNumber, "invalid input endpoint: %v", err)
 			}
-			output, err := parseEndpointRef(fields[2])
+			output, err := ParseTarget(fields[2])
 			if err != nil {
 				return Spec{}, lineError(lineNumber, "invalid output endpoint: %v", err)
 			}

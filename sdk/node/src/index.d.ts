@@ -24,11 +24,13 @@ export function inputHttpOptions(
   env?: ComponentEnvironment,
 ): Readonly<{ socketPath: string }>;
 export function connectInput(name: string, options?: ConnectOptions): Socket;
+/** Raw output transport, including the proxy header. Prefer outputConnections. */
 export function connectOutput(name: string, options?: ConnectOptions): Socket;
+/** Yields application streams with the proxy-supplied component.endpoint origin. */
 export function outputConnections(
   name: string,
   options?: OutputOptions,
-): AsyncGenerator<Socket, void, void>;
+): AsyncGenerator<Socket & { readonly origin: string }, void, void>;
 export function serveOutput(
   server: Server,
   name: string,

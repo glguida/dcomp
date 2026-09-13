@@ -28,6 +28,7 @@ type viewDocument struct {
 	Phase       string                  `json:"phase,omitempty"`
 	Components  []viewComponentDocument `json:"components"`
 	Links       []viewLinkDocument      `json:"links"`
+	Globals     []composition.Global    `json:"globals,omitempty"`
 	Networks    []networkStatusDocument `json:"networks,omitempty"`
 	Proxy       *viewProxyDocument      `json:"proxy,omitempty"`
 }
@@ -51,6 +52,7 @@ type viewEndpointRefDocument struct {
 }
 
 type viewLinkDocument struct {
+	Global            string                    `json:"global,omitempty"`
 	Service           string                    `json:"service"`
 	Input             viewEndpointRefDocument   `json:"input"`
 	Output            viewEndpointRefDocument   `json:"output"`
@@ -120,8 +122,9 @@ func viewFromSpec(spec composition.Spec) viewDocument {
 		return document.Components[i].Name < document.Components[j].Name
 	})
 	for _, link := range spec.Links {
-		document.Links = append(document.Links, viewLink(link, services))
+		document.Links = append(document.Links, viewGlobalLink(link, services, spec.Globals))
 	}
+	document.Globals = sortedGlobals(spec.Globals)
 	sortViewLinks(document.Links)
 	return document
 }
@@ -187,10 +190,10 @@ func viewFromStatus(status lifecycle.Status) viewDocument {
 		}] = index
 	}
 	for _, link := range status.Spec.Links {
-		item := viewLink(link, services)
+		item := viewGlobalLink(link, services, status.Spec.Globals)
 		identity := viewLinkIdentity{
 			inputComponent: link.Input.Component, inputEndpoint: link.Input.Endpoint,
-			outputComponent: link.Output.Component, outputEndpoint: link.Output.Endpoint,
+			outputComponent: item.Output.Component, outputEndpoint: item.Output.Endpoint,
 		}
 		if index, exists := metricsByLink[identity]; exists {
 			metrics := status.Proxy.Links[index]
@@ -205,6 +208,7 @@ func viewFromStatus(status lifecycle.Status) viewDocument {
 		}
 		document.Links = append(document.Links, item)
 	}
+	document.Globals = sortedGlobals(status.Spec.Globals)
 	sortViewLinks(document.Links)
 	return document
 }
@@ -332,12 +336,15 @@ func printView(output io.Writer, document viewDocument) {
 		for _, link := range document.Links {
 			fmt.Fprintf(
 				output,
-				"%s.%s\t%s.%s\t%s\n",
+				"%s.%s\t%s\t%s\n",
 				link.Input.Component, link.Input.Endpoint,
-				link.Output.Component, link.Output.Endpoint,
+				viewTargetText(link),
 				link.Service,
 			)
 		}
+	}
+	for _, global := range document.Globals {
+		fmt.Fprintf(output, "global\t%s\t%s\t%s\n", global.Name, global.Service, global.Target.String())
 	}
 	for _, component := range document.Components {
 		for _, published := range component.PublishedPorts {
@@ -380,4 +387,29 @@ func printView(output io.Writer, document viewDocument) {
 	for _, problem := range problems {
 		fmt.Fprintf(output, "problem\t%s\n", problem)
 	}
+}
+
+func sortedGlobals(globals []composition.Global) []composition.Global {
+	result := append([]composition.Global(nil), globals...)
+	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	return result
+}
+
+func viewGlobalLink(link composition.Link, services map[string]string, globals []composition.Global) viewLinkDocument {
+	name := link.Output.Global
+	link.Output = composition.ResolveTarget(globals, link.Output)
+	item := viewLink(link, services)
+	item.Global = name
+	return item
+}
+
+func viewTargetText(link viewLinkDocument) string {
+	target := "unbound"
+	if link.Output.Component != "" {
+		target = link.Output.Component + "." + link.Output.Endpoint
+	}
+	if link.Global != "" {
+		return "@" + link.Global + " -> " + target
+	}
+	return target
 }

@@ -9,7 +9,7 @@ import (
 )
 
 func TestLoadConfigRequiresCurrentVersion(t *testing.T) {
-	for _, version := range []int{1, ConfigVersion + 1} {
+	for _, version := range []int{1, 2, ConfigVersion + 1} {
 		t.Run(fmt.Sprintf("version-%d", version), func(t *testing.T) {
 			config := testConfig(t, false)
 			config.Version = version

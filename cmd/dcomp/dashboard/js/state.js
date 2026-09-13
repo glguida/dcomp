@@ -1,5 +1,6 @@
 /* Shared viewer state. One mutable object, owned by main.js's fetch loop and
-   read by the render layer; selection is {kind: "component"|"link"|"port"}. */
+   read by the render layer; selection has a kind (component, link, port,
+   global, egress, publish) and id. */
 export const state = {
   systems: [],
   current: null,

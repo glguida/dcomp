@@ -258,6 +258,7 @@ func (manager *fakeProxyManager) Resync(
 		})
 	}
 	config.Links = append([]proxy.Link(nil), wiring.Links...)
+	config.Globals = append([]proxy.Global(nil), wiring.Globals...)
 	actual.Digest = digest
 	manager.processes[actual.InstanceID] = actual
 	manager.configs[actual.InstanceID] = config

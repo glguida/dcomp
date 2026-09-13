@@ -27,6 +27,7 @@ Top-level fields:
 | `operation`, `phase` | Present while a lifecycle operation is recorded. |
 | `components` | Declared components, sorted by name. |
 | `links` | Declared links, sorted by input reference. |
+| `globals` | Optional typed global assignments, sorted by name; empty targets are unbound. |
 | `networks` | Observed network diagnostics (`state` only). |
 | `proxy` | Observed proxy readiness, endpoint counts, active stream pairs, and any problem (`state` only). |
 
@@ -45,9 +46,28 @@ Each link carries its `input` and `output` endpoint references and the linked
 `active` means at least one stream pair is currently forwarding; it says
 nothing about whether bytes are moving. The counters measure successfully
 forwarded opaque transport bytes and reset when the per-system proxy restarts.
-These fields are absent in file views or when proxy metrics are unavailable;
+These fields are absent in file views, for unbound global links, or when proxy
+metrics are unavailable;
 absence means unknown, not idle. A view is an observation: reading it never
 repairs, starts, or stops anything.
+
+## Global interfaces
+
+Global assignments appear in the document's optional `globals` array and the
+text/dashboard descriptor. The dashboard keeps a clickable global-interface
+list in the sidebar; symbolic names in other descriptors are clickable too.
+Selecting a name highlights its assigned output, its consumer inputs, and
+only the wires that reference that name. The descriptor shows the service,
+current target, and consumers. Selection follows reassignment on each refresh;
+an unbound name still highlights its consumer inputs. Click the selected name
+again, click the stage background, or press Escape to clear the selection.
+The buttons support keyboard focus and activation.
+
+A symbolic link carries `global` plus its currently resolved `output`. Unbound outputs contain empty component/endpoint strings;
+the dashboard leaves those wires unrouted and describes the target as unbound.
+The input and its symbolic name remain visible. Reassignment changes the
+resolved route and resets metrics for that changed concrete link; direct links
+and their metrics are unaffected.
 
 ## The dashboard server
 

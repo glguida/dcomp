@@ -45,9 +45,11 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 mkdir -p "$temporary/echo" "$temporary/uppercase" "$temporary/caller"
-cp "$root/examples/echo/component.dcomp" "$temporary/echo/component.dcomp"
-cp "$root/examples/uppercase/component.dcomp" "$temporary/uppercase/component.dcomp"
-cp "$root/examples/caller/component.dcomp" "$temporary/caller/component.dcomp"
+for example in echo uppercase caller
+do
+    sed "s|^docker .*|docker ${DCOMP_TEST_IMAGE_PREFIX:-dcomp-example}-$example:${DCOMP_TEST_IMAGE_TAG:-dev}|" \
+        "$root/examples/$example/component.dcomp" >"$temporary/$example/component.dcomp"
+done
 
 write_system() {
     include_transient=$1

@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	formatVersion        = 4
+	formatVersion        = 5
 	engineBindingVersion = 2
 	documentSizeLimit    = 16 * 1024 * 1024
 )
@@ -198,6 +198,19 @@ func (lock *Lock) Close() error {
 // Acquire obtains a non-stale kernel lock for one system. The lock file
 // persists, but ownership does not: the kernel releases it on process death.
 func (store Store) Acquire(name string) (*Lock, error) {
+	return store.acquire(context.Background(), name, false)
+}
+
+// AcquireContext waits for another program's operation to finish. Cancellation
+// releases the waiting descriptor; the kernel still owns lock lifetime.
+func (store Store) AcquireContext(ctx context.Context, name string) (*Lock, error) {
+	return store.acquire(ctx, name, true)
+}
+
+func (store Store) acquire(ctx context.Context, name string, wait bool) (*Lock, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	directory, err := store.directory(name)
 	if err != nil {
 		return nil, err
@@ -209,12 +222,27 @@ func (store Store) Acquire(name string) (*Lock, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open state lock: %w", err)
 	}
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		file.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) {
+	for {
+		err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+			file.Close()
+			return nil, fmt.Errorf("lock system %q: %w", name, err)
+		}
+		if !wait {
+			file.Close()
 			return nil, fmt.Errorf("another dcomp operation is running for %q", name)
 		}
-		return nil, fmt.Errorf("lock system %q: %w", name, err)
+		timer := time.NewTimer(10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			file.Close()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
 	}
 	return &Lock{file: file}, nil
 }
@@ -456,7 +484,7 @@ func (store Store) WriteOperation(name string, operation Operation) error {
 }
 
 func validateDeployment(name string, deployment Deployment) error {
-	if deployment.Version != formatVersion {
+	if deployment.Version != formatVersion && deployment.Version != 4 {
 		return fmt.Errorf("unsupported desired state version %d", deployment.Version)
 	}
 	if deployment.Spec.Name != name {
@@ -489,7 +517,7 @@ func validateDeployment(name string, deployment Deployment) error {
 }
 
 func validateOperation(name string, operation Operation) error {
-	if operation.Version != formatVersion {
+	if operation.Version != formatVersion && operation.Version != 4 {
 		return fmt.Errorf("unsupported operation state version %d", operation.Version)
 	}
 	if operation.ID == "" || operation.Kind == "" || operation.Phase == "" {

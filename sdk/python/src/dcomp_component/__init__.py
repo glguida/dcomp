@@ -1,4 +1,4 @@
-"""Client-only component socket helpers for DComp 0.2."""
+"""Client-only component socket helpers for DComp 0.3.0."""
 
 from .endpoints import (
     input_env,
@@ -24,4 +24,4 @@ __all__ = [
     "unix_path",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

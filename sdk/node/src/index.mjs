@@ -3,6 +3,8 @@ import { posix } from "node:path";
 
 const ENDPOINT_NAME = /^[a-z][a-z0-9-]*$/u;
 const DEFAULT_RETRY_DELAY_MS = 25;
+const MAX_ORIGIN_HEADER = 8 + 63 + 1 + 63 + 1; // Prefix, two names, dot, LF.
+const ORIGIN_HEADER = /^DCOMP\/1 ([a-z][a-z0-9-]{0,62}\.[a-z][a-z0-9-]{0,62})\n$/u;
 const ignoreClaimedConnectionError = () => {};
 
 export function inputEnv(name) {
@@ -177,6 +179,7 @@ function claimedConnection(path, signal) {
   return new Promise((resolve) => {
     const connection = createConnection({ allowHalfOpen: true, path });
     let settled = false;
+    let header = Buffer.alloc(0);
 
     const finish = (result) => {
       if (settled) return;
@@ -193,8 +196,25 @@ function claimedConnection(path, signal) {
       finish(undefined);
     };
     const onData = (chunk) => {
+      const newline = chunk.indexOf(10);
+      const length = newline === -1 ? chunk.length : newline + 1;
+      if (header.length + length > MAX_ORIGIN_HEADER) {
+        rejectConnection();
+        return;
+      }
+      header = Buffer.concat([header, chunk.subarray(0, length)]);
+      if (newline === -1) {
+        if (header.length === MAX_ORIGIN_HEADER) rejectConnection();
+        return;
+      }
+      const match = ORIGIN_HEADER.exec(header.toString("utf8"));
+      if (match === null) {
+        rejectConnection();
+        return;
+      }
       connection.pause();
-      connection.unshift(chunk);
+      Object.defineProperty(connection, "origin", { value: match[1], enumerable: true });
+      if (length < chunk.length) connection.unshift(chunk.subarray(length));
       // A stream error can arrive between resolving this promise and the
       // consumer or server installing its own handler. Keep a fallback so a
       // peer reset in that handoff window cannot terminate the Node process.
@@ -210,7 +230,7 @@ function claimedConnection(path, signal) {
     const onError = () => rejectConnection();
     const onAbort = () => rejectConnection();
 
-    connection.once("data", onData);
+    connection.on("data", onData);
     connection.once("end", onEnd);
     connection.once("close", onClose);
     connection.once("error", onError);

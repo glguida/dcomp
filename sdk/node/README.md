@@ -1,6 +1,6 @@
 # @dcomp/component for Node.js
 
-This dependency-free package implements DComp 0.2's component-facing Unix
+This dependency-free package implements DComp 0.3.0's component-facing Unix
 socket contract. It works with raw streams and Node's native HTTP/1.1 server;
 it does not depend on protobuf, gRPC, ConnectRPC, or Cyclo.
 
@@ -82,8 +82,9 @@ await serveOutput(server, "api", { signal: shutdown.signal });
 
 Do not call `server.listen()` for the DComp interface. The helper repeatedly
 connects to `DCOMP_OUT_API`, waits until the proxy pairs the stream with a real
-consumer, restores the first byte, and emits the server's normal `connection`
-event. The ConnectRPC adapter then processes the HTTP/1.1 request normally.
+consumer, consumes the proxy header, and emits the server's normal `connection`
+event. The socket's read-only `origin` string identifies the immediate consumer
+as `component.input-endpoint`; HTTP handlers can read `request.socket.origin`. The ConnectRPC adapter then processes the HTTP/1.1 request normally.
 
 Aborting `serveOutput()` stops acquisition of new connections and wakes an
 unclaimed connection. Connections already handed to the server remain under
@@ -120,11 +121,17 @@ for await (const connection of outputConnections("events", {
 
 It retries proxy connection failures, discards producer streams that close
 before a consumer appears, and yields one paused `net.Socket` per real consumer
-with its first byte preserved. The receiver owns each yielded socket.
+with application bytes untouched and its origin available as `connection.origin`.
+The receiver owns each yielded socket.
 
-The claimed-connection adapters are intended for client-first protocols such
-as HTTP. A server-first protocol can use `connectOutput()` and manage its
-desired number of raw producer connections explicitly.
+The claimed-connection adapters support both client-first and server-first
+protocols: they wait for the proxy header, not an application byte.
+
+`connectOutput()` is a raw transport helper: the returned socket includes
+the proxy header and has no `origin` property. Custom adapters using it must
+consume the header according to the
+[connection-origin contract](../../docs/component-contract.md#connection-origin).
+Ordinary servers should use `outputConnections()` or `serveOutput()`.
 
 ## API summary
 

@@ -1,6 +1,6 @@
 # Machine API 2
 
-DComp 0.2 emits newline-terminated JSON documents for commands that explicitly
+DComp 0.3 emits newline-terminated JSON documents for commands that explicitly
 accept `--json`. Every document contains `"api_version": 2`, except that the
 version document places the same field alongside the semantic version.
 
@@ -26,6 +26,15 @@ both codes and then validate that the code agrees with the field.
 On errors other than a successfully observed non-operational status, callers
 must not expect a JSON document.
 
+## Incremental commands
+
+`add-component`, `rm-component`, `mod-wire`, and `assign-global` use the common
+exit statuses, with progress on stderr and no JSON success document. Inspect
+`view --json` after editing to resolve names and inspect the committed topology.
+These commands accept partial changes; `up` still accepts an authoritative
+complete system. The proxy's separate internal control protocol is version 2;
+see the [CLI reference](reference.md#proxy-control-protocol-2) for its messages. It is independent of Machine API 2.
+
 ## Version document
 
 ```text
@@ -33,7 +42,7 @@ dcomp version --json
 ```
 
 ```json
-{"version":"0.2.1","api_version":2}
+{"version":"0.3.0","api_version":2}
 ```
 
 - `version` is the DComp semantic version string.
@@ -112,10 +121,10 @@ Top-level fields:
   no proxy is recorded. `proxy.digest` is the wiring digest observed from the
   live proxy, not part of process identity; it is omitted while resync is not
   converged. `active_connections` counts active proxy stream pairs, not idle
-  producer connections. When available, `links` contains one item per full
-  link identity with its active-pair gauge and cumulative directional bytes.
+  producer connections. When available, `links` contains one item per resolved
+  concrete link identity with its active-pair gauge and cumulative directional bytes.
   Byte counters reset when the proxy process is replaced or a removed link is
-  recreated.
+  recreated. Unbound global links have no concrete route or metric.
 - `networks` contains the target or committed component egress networks.
 - `components` contains the target or committed component records, sorted by
   component name.
@@ -124,7 +133,7 @@ Each network contains:
 
 - `key`: the DComp topology key, currently `component/INSTANCE`;
 - `id`: the immutable Docker network ID when recorded;
-- `internal`: the observed DComp network policy; 0.2 egress networks are
+- `internal`: the observed DComp network policy; egress networks are
   non-internal; and
 - `problem`: an empty string or an identity/policy/inspection diagnostic.
 
@@ -279,11 +288,15 @@ it with current observations. Representative state response:
   image reference, sorted endpoint declarations, egress policy, binds,
   volumes, arguments, and declared port publications. `image_id` and `status`
   are present only in state views with a resolved component and observation.
-- `links` is sorted by input reference. A live proxy observation adds
-  `active`, `active_connections`, and `activity`. `active` is connection state;
+- `globals`, when nonempty, is sorted by name. Each item has `name`, `service`,
+  and `target: {component, endpoint}`. Empty target strings mean unbound.
+- `links` is sorted by input reference. Each symbolic link includes `global`;
+  `output` shows its currently resolved concrete endpoint, or empty component
+  and endpoint strings when unbound. Direct links omit `global`.
+  A live proxy observation adds `active`, `active_connections`, and `activity`. `active` is connection state;
   `activity` contains cumulative successfully forwarded bytes in each
   direction. These observations are absent for file views or unavailable
-  proxy metrics; absence means unknown, not zero.
+  proxy metrics, including unbound global links; absence means unknown, not zero.
 - `networks` may be present for a recorded topology with egress networks, and
   `proxy` is present for a recorded topology. Network and component status
   objects use the status-document schemas. The proxy object reports readiness,
@@ -291,9 +304,10 @@ it with current observations. Representative state response:
   link metrics live on the links themselves, and the proxy object intentionally
   omits process identity.
 
-`digest`, `operation`, `phase`, `networks`, and `proxy` are optional. Within a
-component, `image_id` and `status` are optional. Within a link, `active`,
-`active_connections`, and `activity` are optional as one observation group.
+`digest`, `operation`, `phase`, `globals`, `networks`, and `proxy` are optional.
+Within a component, `image_id` and `status` are optional. Within a link, `global`
+is optional; `active`, `active_connections`, and `activity` are optional as one
+observation group.
 Arrays that are part of a component or the top-level topology are otherwise
 present even when empty.
 
@@ -408,7 +422,7 @@ A machine client should:
 1. run `dcomp version --json` without lifecycle flags;
 2. require a supported `api_version` and semantic-version range;
 3. decode the complete required shape for that API version;
-4. accept the documented optional retiring arrays;
+4. accept documented optional fields and ignore unknown fields;
 5. treat `problem` strings as diagnostics for humans, not stable identifiers;
    and
 6. use immutable IDs and structured fields rather than parsing text output.

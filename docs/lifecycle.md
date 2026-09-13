@@ -16,9 +16,10 @@ namespace. Every owned container, egress network, and named volume includes
 that namespace in both its physical name and ownership labels, so another
 state root can control an independently named system on the same Engine.
 
-State format 4, introduced by DComp 0.2.1, records:
+State format 5, written by DComp 0.3.0, records:
 
-- the canonical resolved system and digest;
+- the canonical resolved system and digest, including typed globals and
+  symbolic links;
 - the transient runtime root;
 - exact immutable Docker egress-network and container IDs;
 - the proxy instance ID, PID, wiring digest, runtime directory, control
@@ -30,8 +31,10 @@ State format 4, introduced by DComp 0.2.1, records:
   name, and immutable endpoint ID; and
 - create requests whose result may have been lost.
 
-Earlier state formats and engine bindings are rejected. DComp does not infer
-new digest or wiring semantics from an older record.
+State format 4 remains readable; new writes use format 5, including when
+resuming older state. Formats before 4 and incompatible engine bindings are
+rejected. A readable record does not make an older live proxy compatible; see
+[Migration to 0.3.0](../README.md#migration-to-030).
 
 Named volumes have deterministic names rather than immutable IDs. Their
 driver and complete DComp ownership label set are verified on every use.
@@ -54,7 +57,7 @@ process after PID reuse.
 
 ## Apply operation
 
-The 0.2.1 apply phase sequence is:
+The apply phase sequence is:
 
 ```text
 retire -> networks -> resync -> create -> attach -> start -> commit
@@ -67,7 +70,7 @@ the first destructive call. A component is retained when its
 container-definition digest is unchanged and the recorded proxy is still
 identity-verified. That digest covers image ID, runtime policy, publications,
 egress, mounts, and the component's own endpoint set; it deliberately excludes
-link targets. Components being removed or recreated are stopped and removed
+link targets and global assignments. Components being removed or recreated are stopped and removed
 before socket publication.
 
 Before removing an egress container, DComp inspects its recorded bridge and
@@ -85,8 +88,8 @@ disappeared out of band before DComp could journal its endpoint.
 
 DComp creates or recovers one dedicated bridge for each component that
 declares `egress`. Components without that declaration have no network
-resource and run with Docker network mode `none`. There are no link networks
-in 0.2. Each egress bridge contains only its component and is non-internal.
+resource and run with Docker network mode `none`. There are no link networks.
+Each egress bridge contains only its component and is non-internal.
 
 Network create intent is durable before the Docker request. If the response is
 lost, resume inspects the deterministic name, requires the current operation
@@ -157,19 +160,39 @@ and proxy identities to `desired.json`, then clears the operation.
 ## Incremental changes
 
 Container-definition digests cover immutable image ID, the component's own
-endpoint definition, and normalized runtime policy. Link targets are excluded.
-The proxy has a separate wiring digest over endpoint triples and full link
-pairs only.
+endpoint definition, and normalized runtime policy. Link targets and global
+assignments are excluded. The proxy has a separate wiring digest over endpoint
+triples, global assignments, and links retaining their direct or symbolic targets.
 
 - An image-only change replaces that component while retaining the proxy and
   unrelated running containers.
 - Adding a component publishes its listeners and creates only that container.
-- Removing a component retires it, then removes only its endpoints and links.
-- Relinking existing endpoints performs zero container operations.
+- Removing a component retires it, removes its endpoints and direct wires,
+  and unbinds its exported globals while retaining symbolic consumers.
+- Relinking existing endpoints or reassigning a global performs zero container
+  operations; streams close only when their concrete route changes.
 - Changing a component's own endpoint set recreates only that component and
   resyncs the proxy.
 - Runtime-root changes likewise replace the proxy and containers.
 - Named volumes survive every replacement.
+
+### Editing committed state
+
+Each incremental CLI/API operation obtains a cancellable waiting exclusive
+system lock before reading desired state. Existing image references are pinned
+to immutable IDs while resolving the edited composition. Validation precedes
+Docker mutation. The resulting target uses the same apply journal, previous
+deployment, proxy wiring digest, and resume/abort machinery as `up`.
+
+`add-component` can initialize an absent system. Other edits require committed
+state. Edits refuse incomplete operations rather than superseding another
+program's work. Global reassignment changes only wiring identity; component
+definition digests are unaffected. Removing an exporter records its names as
+unbound in target state before retirement, preserving those names during
+resume and restoring previous bindings during abort when recovery succeeds.
+An empty system is valid and retains the proxy and global namespace until
+`down`. All newly introduced state fields are included in the existing
+write-ahead target and configuration publication transactions.
 
 ## Resume, supersede, and abort
 
@@ -181,10 +204,9 @@ runtime root match. Otherwise it first resolves pending creates and safely
 aborts the stale target before applying the new one.
 
 `dcomp abort NAME` removes operation-owned target containers first, then
-reverse-resyncs the retained proxy to the previous committed wiring. It remains
-not-rollback in the general case because resources retired earlier may already
-be gone, but a successful reverse resync approximates rollback. If reverse
-resync transiently cannot converge, abort takes the full-replacement path and
+reverse-resyncs the retained proxy to the previous committed wiring. It cannot
+guarantee rollback because resources retired earlier may already be gone. If
+reverse resync transiently cannot converge, abort takes the full-replacement path and
 recreates the previous fleet. Identity or protocol mismatches are terminal.
 Abort refuses to proceed while any create result remains unresolved.
 

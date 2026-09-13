@@ -28,6 +28,10 @@ Usage:
   dcomp version [--json]
   dcomp [--state-root DIR] [--runtime-root DIR] check FILE
   dcomp [--state-root DIR] [--runtime-root DIR] up FILE
+  dcomp [GLOBAL_OPTIONS] add-component [OPTIONS] SYSTEM NAME PATH
+  dcomp [GLOBAL_OPTIONS] rm-component SYSTEM NAME
+  dcomp [GLOBAL_OPTIONS] mod-wire SYSTEM COMPONENT.INPUT COMPONENT.OUTPUT|@GLOBAL|-
+  dcomp [GLOBAL_OPTIONS] assign-global [--service TYPE] SYSTEM NAME COMPONENT.OUTPUT|-
   dcomp [--state-root DIR] [--runtime-root DIR] ps [-a|--all] [--json] [NAME]
   dcomp [--state-root DIR] [--runtime-root DIR] status [--json] NAME
   dcomp [--state-root DIR] [--runtime-root DIR] view [--json] FILE|NAME
@@ -130,6 +134,8 @@ func run(arguments []string) int {
 	defer stop()
 
 	switch command {
+	case "add-component", "rm-component", "mod-wire", "assign-global":
+		return runEdit(ctx, &controller, command, commandArgs)
 	case "check":
 		if len(commandArgs) != 1 {
 			return commandUsage("check expects FILE")

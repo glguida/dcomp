@@ -194,7 +194,7 @@ func TestDialListenerReconnectsAfterUnclaimedStreamCloses(t *testing.T) {
 		_ = first.Close()
 		second, acceptErr := upstream.Accept()
 		if acceptErr == nil {
-			_, acceptErr = second.Write([]byte("x"))
+			_, acceptErr = second.Write([]byte("DCOMP/1 consumer.upstream\nx"))
 			_ = second.Close()
 		}
 		upstreamResult <- acceptErr
@@ -205,6 +205,9 @@ func TestDialListenerReconnectsAfterUnclaimedStreamCloses(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer connection.Close()
+	if got := connection.RemoteAddr().String(); got != "consumer.upstream" {
+		t.Fatalf("origin = %q", got)
+	}
 	var value [1]byte
 	if _, err := io.ReadFull(connection, value[:]); err != nil {
 		t.Fatal(err)
@@ -214,6 +217,43 @@ func TestDialListenerReconnectsAfterUnclaimedStreamCloses(t *testing.T) {
 	}
 	if err := <-upstreamResult; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDialListenerCloseInterruptsPartialOrigin(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "output.sock")
+	upstream, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upstream.Close()
+	listener := newDialListener(context.Background(), path)
+	defer listener.Close()
+	result := make(chan error, 1)
+	go func() {
+		connection, err := listener.Accept()
+		if connection != nil {
+			_ = connection.Close()
+		}
+		result <- err
+	}()
+	_ = upstream.(*net.UnixListener).SetDeadline(time.Now().Add(time.Second))
+	connection, err := upstream.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	if _, err := io.WriteString(connection, "DCOMP/1 partial"); err != nil {
+		t.Fatal(err)
+	}
+	_ = listener.Close()
+	select {
+	case err := <-result:
+		if !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("Accept error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not interrupt the origin read")
 	}
 }
 

@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/glguida/dcomp/internal/runtimecontract"
+
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
@@ -29,6 +31,8 @@ type Option func(*serverConfig) error
 
 // WithOutput adds one declared output endpoint to Serve. The component dials
 // the proxy-provided Unix socket; it never binds or listens on that path.
+// RPC handlers can read the originating "component.endpoint" through
+// peer.FromContext(ctx).Addr.String(); the address network is "dcomp".
 func WithOutput(name string) Option {
 	return func(config *serverConfig) error {
 		if _, err := OutputEnv(name); err != nil {
@@ -247,23 +251,21 @@ func (listener *dialListener) Accept() (net.Conn, error) {
 		}
 		// The proxy accepts producer connections before a consumer necessarily
 		// exists. A gRPC server would otherwise spin through the Unix listen
-		// backlog and accumulate idle transports. Wait for the first client byte,
-		// then replay it to gRPC; this also makes one output connection correspond
-		// to one actual consumer connection.
+		// backlog and accumulate idle transports. The proxy sends the origin
+		// header only when this output is paired with an actual consumer.
 		type readResult struct {
-			value byte
-			err   error
+			origin string
+			err    error
 		}
 		read := make(chan readResult, 1)
 		go func() {
-			var first [1]byte
-			_, readErr := connection.Read(first[:])
-			read <- readResult{value: first[0], err: readErr}
+			origin, readErr := runtimecontract.ReadOrigin(connection)
+			read <- readResult{origin: origin, err: readErr}
 		}()
 		select {
 		case result := <-read:
 			if result.err == nil {
-				return &prefixedConn{Conn: connection, prefix: []byte{result.value}}, nil
+				return &originConn{Conn: connection, origin: result.origin}, nil
 			}
 			_ = connection.Close()
 			if !listener.retry() {
@@ -297,19 +299,19 @@ func (listener *dialListener) Addr() net.Addr {
 	return &net.UnixAddr{Name: listener.path, Net: "unix"}
 }
 
-type prefixedConn struct {
+type originConn struct {
 	net.Conn
-	prefix []byte
+	origin string
 }
 
-func (connection *prefixedConn) Read(buffer []byte) (int, error) {
-	if len(connection.prefix) != 0 && len(buffer) != 0 {
-		buffer[0] = connection.prefix[0]
-		connection.prefix = connection.prefix[1:]
-		return 1, nil
-	}
-	return connection.Conn.Read(buffer)
+func (connection *originConn) RemoteAddr() net.Addr {
+	return originAddr(connection.origin)
 }
+
+type originAddr string
+
+func (address originAddr) Network() string { return "dcomp" }
+func (address originAddr) String() string  { return string(address) }
 
 type acceptResult struct {
 	connection net.Conn

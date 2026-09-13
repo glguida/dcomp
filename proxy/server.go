@@ -13,11 +13,13 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/glguida/dcomp/internal/runtimecontract"
 )
 
 const (
 	maxControlMessage      = 16 * 1024 * 1024
-	ControlProtocolVersion = 1
+	ControlProtocolVersion = 2
 	controlRequestTimeout  = 30 * time.Second
 )
 
@@ -28,14 +30,18 @@ var (
 )
 
 type ControlRequest struct {
-	Command         string  `json:"command"`
-	InstanceID      string  `json:"instance_id"`
-	ProtocolVersion int     `json:"protocol_version"`
-	Wiring          *Wiring `json:"wiring,omitempty"`
-	Digest          string  `json:"digest,omitempty"`
+	Command         string    `json:"command"`
+	InstanceID      string    `json:"instance_id"`
+	ProtocolVersion int       `json:"protocol_version"`
+	Wiring          *Wiring   `json:"wiring,omitempty"`
+	Digest          string    `json:"digest,omitempty"`
+	Wire            *WireEdit `json:"wire,omitempty"`
+	Global          *Global   `json:"global,omitempty"`
+	ExpectedDigest  string    `json:"expected_digest,omitempty"`
 }
 
 type Status struct {
+	Globals                []Global      `json:"globals,omitempty"`
 	Version                int           `json:"version"`
 	ControlProtocolVersion int           `json:"control_protocol_version"`
 	System                 string        `json:"system"`
@@ -424,7 +430,7 @@ func (server *server) registerOutputLocked(outputKey string, connection net.Conn
 }
 
 func (server *server) outputHasConsumerLocked(outputKey string) bool {
-	for _, link := range server.wiring.Links {
+	for _, link := range server.wiring.ResolvedLinks() {
 		if linkOutputKey(link) == outputKey {
 			return true
 		}
@@ -435,7 +441,7 @@ func (server *server) outputHasConsumerLocked(outputKey string) bool {
 func (server *server) popInputForOutputLocked(outputKey string) (Link, *pendingConnection) {
 	// Wiring is canonical, which makes selection deterministic across fan-in
 	// links while preserving FIFO order within each link.
-	for _, link := range server.wiring.Links {
+	for _, link := range server.wiring.ResolvedLinks() {
 		if linkOutputKey(link) != outputKey {
 			continue
 		}
@@ -488,6 +494,7 @@ func (server *server) runPair(pair *streamPair) {
 		server.runCtx,
 		linkInputKey(pair.link),
 		linkOutputKey(pair.link),
+		pair.link.InputComponent+"."+pair.link.InputEndpoint,
 		pair.consumer,
 		pair.producer,
 		pair.metrics,
@@ -501,25 +508,11 @@ func (server *server) runPair(pair *streamPair) {
 	server.mu.Unlock()
 }
 
-// forward is retained as the small testable forwarding boundary. Live broker
-// pairs pass their exact link-counter pointer to forwardWithMetrics.
-func (server *server) forward(
-	ctx context.Context,
-	inputKey,
-	outputKey string,
-	consumer,
-	producer net.Conn,
-) {
-	server.mu.Lock()
-	metrics := server.linkMetrics[inputKey+"\x00"+outputKey]
-	server.mu.Unlock()
-	server.forwardWithMetrics(ctx, inputKey, outputKey, consumer, producer, metrics)
-}
-
 func (server *server) forwardWithMetrics(
 	ctx context.Context,
 	inputKey,
-	outputKey string,
+	outputKey,
+	origin string,
 	consumer,
 	producer net.Conn,
 	metrics *linkCounters,
@@ -545,6 +538,14 @@ func (server *server) forwardWithMetrics(
 		source net.Conn,
 		counter *atomic.Uint64,
 	) {
+		// Write the proxy header under the same cancellation/teardown handling
+		// as the stream copies, before any consumer bytes, outside byte metrics.
+		if direction == "input-to-output" {
+			if err := runtimecontract.WriteOrigin(destination, origin); err != nil {
+				done <- copyResult{direction: direction, err: err}
+				return
+			}
+		}
 		writer := io.Writer(destination)
 		if counter != nil {
 			writer = &countingWriter{writer: destination, counter: counter}
@@ -658,6 +659,11 @@ func (server *server) handleControl(connection net.Conn) {
 		server.cancel()
 		server.controlMu.Unlock()
 		_ = writeErr
+	case "mod-wire", "assign-global":
+		server.controlMu.Lock()
+		status := server.handleEdit(request)
+		_ = writeControlMessage(connection, status)
+		server.controlMu.Unlock()
 	case "resync":
 		server.controlMu.Lock()
 		status := server.handleResync(request)
@@ -850,7 +856,7 @@ func (server *server) installRoutesAndMetricsLocked(
 ) {
 	routes := make(map[string]Link, len(wiring.Links))
 	metrics := make(map[string]*linkCounters, len(wiring.Links))
-	for _, link := range wiring.Links {
+	for _, link := range wiring.ResolvedLinks() {
 		routes[linkInputKey(link)] = link
 		key := linkKey(link)
 		if retained := previous[key]; retained != nil {
@@ -866,7 +872,7 @@ func (server *server) installRoutesAndMetricsLocked(
 func (server *server) detachRemovedConnectionsLocked(transition *resyncTransition) {
 	targetLinks := make(map[string]struct{}, len(transition.target.Links))
 	consumableOutputs := make(map[string]struct{}, len(transition.target.Links))
-	for _, link := range transition.target.Links {
+	for _, link := range transition.target.ResolvedLinks() {
 		targetLinks[linkKey(link)] = struct{}{}
 		consumableOutputs[linkOutputKey(link)] = struct{}{}
 	}
@@ -970,7 +976,8 @@ func (server *server) configForWiring(wiring Wiring, digest string) Config {
 	config := Config{
 		Version: ConfigVersion, System: server.system, InstanceID: server.instanceID,
 		RuntimeDir: server.runtimeDir, Digest: digest,
-		Links: append([]Link(nil), wiring.Links...),
+		Links:   append([]Link(nil), wiring.Links...),
+		Globals: append([]Global(nil), wiring.Globals...),
 	}
 	for _, identity := range wiring.Endpoints {
 		config.Endpoints = append(config.Endpoints, Endpoint{
@@ -1018,7 +1025,7 @@ func (server *server) statusForWiringLocked(
 		}
 	}
 	links := make([]LinkMetrics, 0, len(wiring.Links))
-	for _, link := range wiring.Links {
+	for _, link := range wiring.ResolvedLinks() {
 		metrics := server.linkMetrics[linkKey(link)]
 		item := LinkMetrics{
 			InputComponent:  link.InputComponent,
@@ -1039,7 +1046,7 @@ func (server *server) statusForWiringLocked(
 		PID: os.Getpid(), Ready: ready, Inputs: inputs, Outputs: outputs,
 		ActiveConnections: server.active.Load(),
 		PendingInputs:     server.pendingInputN.Load(), PendingOutputs: server.pendingOutputN.Load(),
-		Links: links,
+		Links: links, Globals: append([]Global(nil), wiring.Globals...),
 	}
 }
 

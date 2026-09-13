@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""Real Docker acceptance for incremental composition and global providers."""
+import argparse
+import concurrent.futures
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--image-prefix", default="dcomp-example")
+    parser.add_argument("--image-tag", default="dev")
+    options = parser.parse_args()
+    root = Path(__file__).resolve().parent.parent
+    with tempfile.TemporaryDirectory(prefix="dcomp-incremental-") as temporary:
+        directory = Path(temporary)
+        state = directory / "state"
+        command = [str(root / "bin/dcomp"), "--state-root", str(state)]
+        system = "incremental"
+
+        def run(*args, success=True):
+            result = subprocess.run(command + list(args), text=True, capture_output=True, timeout=90)
+            if success and result.returncode:
+                raise AssertionError(f"{args}: {result.stderr}")
+            if not success and result.returncode == 0:
+                raise AssertionError(f"unexpected success: {args}")
+            return result
+
+        def view():
+            return json.loads(run("view", "--json", system).stdout)
+
+        def ids():
+            return {item["name"]: item["status"]["container_id"] for item in view()["components"]}
+
+        for component in ("echo", "uppercase", "caller"):
+            manifest = (root / "examples" / component / "component.dcomp").read_text()
+            manifest = manifest.replace(f"dcomp-example-{component}:dev", f"{options.image_prefix}-{component}:{options.image_tag}")
+            (directory / component).mkdir()
+            (directory / component / "component.dcomp").write_text(manifest)
+        client = directory / "client"
+        subprocess.run(["go", "build", "-o", str(client), "./examples/caller"], cwd=root, check=True, timeout=120)
+
+        def probe(component, expected=None):
+            env = dict(os.environ, DCOMP_IN_UPSTREAM="unix://" + str(state / "run" / system / "in" / f"{component}.upstream"))
+            result = subprocess.run([str(client), "--timeout", "2s" if expected is not None else "250ms", "Hello"], env=env, capture_output=True, text=True, timeout=5)
+            if expected is None:
+                assert result.returncode != 0, result.stdout
+            else:
+                assert result.returncode == 0, result.stderr
+                assert result.stdout.strip() == expected, result.stdout
+
+        try:
+            run("add-component", system, "echo", str(directory / "echo"))
+            run("assign-global", system, "provider_endpoint", "echo.echo")
+            caller_args = ["--arg=--timeout", "--arg=250ms", "--arg=--repeat", "--arg=100ms", "--arg=loop"]
+            run("add-component", *caller_args, "--link", "upstream=@provider_endpoint", system, "caller", str(directory / "caller"))
+            run("add-component", *caller_args, "--link", "upstream=echo.echo", system, "direct", str(directory / "caller"))
+            original_ids = ids()
+            socket = state / "run" / system / "in/caller.upstream"
+            original_inode = socket.stat().st_ino
+            probe("caller", "Hello")
+
+            run("add-component", "--link", "upstream=echo.echo", system, "wrapper", str(directory / "uppercase"))
+            run("assign-global", system, "provider_endpoint", "wrapper.echo")
+            probe("caller", "HELLO")
+            probe("direct", "Hello")
+            assert socket.stat().st_ino == original_inode
+            assert all(ids()[name] == identity for name, identity in original_ids.items())
+            global_link = next(link for link in view()["links"] if link["input"]["component"] == "caller")
+            assert global_link["global"] == "provider_endpoint"
+            assert global_link["output"]["component"] == "wrapper"
+
+            run("rm-component", system, "wrapper")
+            unbound = view()
+            assert unbound["globals"][0]["target"]["component"] == ""
+            probe("caller")
+            probe("direct", "Hello")
+            run("assign-global", system, "provider_endpoint", "echo.echo")
+            probe("caller", "Hello")
+            run("mod-wire", system, "caller.upstream", "-")
+            probe("caller")
+            run("mod-wire", system, "caller.upstream", "@provider_endpoint")
+            probe("caller", "Hello")
+
+            # Different CLI processes contribute concurrently to the same system.
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+                results = [pool.submit(run, "add-component", system, f"extra-{i}", str(directory / "echo")) for i in range(3)]
+                for result in results:
+                    result.result()
+            assert len(view()["components"]) == 6
+            run("assign-global", system, "provider_endpoint", "@another", success=False)
+            run("mod-wire", system, "caller.upstream", "@unknown", success=False)
+            probe("caller", "Hello")
+
+            for component in list(ids()):
+                run("rm-component", system, component)
+            empty = view()
+            assert empty["components"] == []
+            assert empty["globals"][0]["name"] == "provider_endpoint"
+            assert empty["globals"][0]["target"]["component"] == ""
+            run("add-component", system, "echo", str(directory / "echo"))
+            run("assign-global", system, "provider_endpoint", "echo.echo")
+            print("incremental Docker acceptance passed: pipeline, removal, failure, rebinding, concurrent programs, empty-system reuse")
+        finally:
+            subprocess.run(command + ["abort", system], capture_output=True, timeout=90)
+            cleanup = subprocess.run(command + ["down", system], capture_output=True, text=True, timeout=90)
+            if cleanup.returncode:
+                raise RuntimeError(f"incremental test cleanup failed: {cleanup.stderr}")
+
+
+if __name__ == "__main__":
+    main()

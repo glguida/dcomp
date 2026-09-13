@@ -4,12 +4,14 @@
 
 DComp runs independently built Docker components on one Linux host. The CLI is
 a short-lived controller; each running system has one long-lived
-`dcomp-proxy` data-plane process. There is no global daemon, scheduler, service
-registry, or multi-host control plane.
+`dcomp-proxy` data-plane process. There is no global daemon, scheduler, or
+multi-host control plane. Each system may declare its own namespace of typed
+global output interfaces.
 
 Downstream projects own their interface definitions, component images,
-`component.dcomp` files, and `system.dcomp`. DComp owns Docker resource
-lifecycle and every declared interface socket.
+`component.dcomp` files, and composition through `system.dcomp` or incremental
+CLI/API calls. DComp owns Docker resource lifecycle and every declared
+interface socket.
 
 ## Static description and resolution
 
@@ -30,13 +32,38 @@ component filter components/filter
 link filter.documents source.documents
 ```
 
-Every input has exactly one link. Outputs may fan out; cycles are valid. The
+Every input has zero or one link. Outputs may fan out; cycles are valid. The
 two endpoint service identifiers must match. DComp treats the resulting byte
 streams as opaque and does not load schemas.
 
 Before mutation DComp validates descriptors and runtime policy, resolves every
 image reference to an immutable ID, checks the image health-check declaration,
-and incorporates endpoint definitions and links into stable digests.
+and incorporates endpoint definitions, global assignments, and symbolic or
+direct links into stable digests.
+
+## Incremental composition and indirection
+
+`add-component`, `rm-component`, `mod-wire`, and `assign-global` edit a running
+system without requiring its complete configuration.
+The lifecycle controller merges each edit with committed state under a waiting
+exclusive lock, pins existing image IDs, then journals a normal apply.
+Independent lifecycle callers therefore cannot overwrite each other through
+a stale read/modify/write sequence. Incomplete
+operations must be resolved before the next edit.
+
+Global assignments are stored in the authored and resolved compositions and
+in proxy wiring. Links retain either a direct endpoint or a global name.
+The proxy derives concrete routes from that symbolic configuration. Unbound
+globals have no route, so calls fail immediately. Reassignment preserves
+unchanged concrete routes and closes changed ones, retaining all surviving
+endpoint inodes. Removing the exporting component unbinds its names and
+retains symbolic consumers. Global names require no SDK or address changes
+beyond the 0.2.2 component contract.
+
+The proxy itself also accepts incremental `mod-wire` and `assign-global`
+messages, serialized with resync and shutdown. The lifecycle CLI uses its
+journaled full-target apply internally so restart/recovery retains the exact
+intent. Raw proxy edits alone do not update durable controller state.
 
 ## Runtime topology
 
@@ -88,6 +115,11 @@ DCOMP_OUT_<OUTPUT>=unix:///run/dcomp/out/<output>
 Names are uppercased and hyphens become underscores. Components connect to
 both input and output addresses. They never bind or listen on interface paths.
 
+When a pair is established, the proxy sends the consumer's component and input
+endpoint identity to the output. SDK adapters consume this transport header
+and expose the origin separately from the unchanged application stream. See
+the [connection-origin contract](component-contract.md#connection-origin).
+
 ## Connection routing
 
 Each output listener feeds a pool of producer-side connections. When a client
@@ -107,7 +139,7 @@ without restarting the proxy or its peers.
 ## Proxy process and readiness
 
 `dcomp-proxy` receives a strict JSON configuration containing the system,
-instance identity, wiring digest, endpoint paths, and links. Before publishing
+instance identity, wiring digest, endpoint paths, global assignments, and links. Before publishing
 any socket it writes `proxy.pid` and creates an internal socket-ownership
 ledger. It then publishes the control and endpoint listeners, writes
 `proxy.ready`, and signals readiness through an inherited file descriptor.
@@ -123,19 +155,20 @@ file as the anchor. `proxy.pid` disappears only after the ledger is empty;
 therefore an absent PID marker from a current proxy proves pathname cleanup has
 finished and manager cleanup performs no socket sweep.
 
-The control socket supports status, graceful shutdown, and resync. Every
+The control socket supports `status`, `shutdown`, authoritative `resync`,
+`mod-wire`, and `assign-global`. Every
 request carries the recorded proxy instance ID and the exact current control-
 protocol version; a mismatch is rejected before command dispatch. Shutdown and
-resync are serialized. Messages are newline-delimited JSON limited to 16 MiB
+all wiring mutations are serialized. Messages are newline-delimited JSON limited to 16 MiB
 in both directions.
 
 Status reports the PID, mutable wiring digest, readiness, endpoint counts,
 pending connections, and system-wide active stream-pair count. During a resync
 transition it reports `ready=false` without claiming a digest. For every
-declared full link identity it also reports an active-pair gauge and cumulative
-bytes successfully forwarded in both directions. Surviving links keep their
+resolved concrete link identity it also reports an active-pair gauge and
+cumulative bytes successfully forwarded in both directions. Surviving links keep their
 counters; counters reset when a proxy is replaced or a removed link is
-recreated.
+recreated. Unbound globals have no concrete route or link metric.
 
 Unix socket pathnames have a small kernel limit. If a valid runtime endpoint
 would exceed it, the proxy binds a deterministic short path in a private,
@@ -152,8 +185,7 @@ paths, bind mounts, or the component wire contract.
 Endpoint sockets are mode `0666` because component images may run under
 arbitrary non-root UIDs. Runtime directories, configuration, PID, readiness,
 control, and log files are owner-only. `SO_PEERCRED` enforcement is optional
-future hardening; there is no encryption or application authentication in
-0.2.
+future hardening; DComp provides no encryption or application authentication.
 
 ## Apply lifecycle
 
@@ -212,6 +244,6 @@ socket. Components receive no Docker socket. Fixed container policy enables an
 init process, restart policy `no`, `no-new-privileges`, drops `NET_RAW`, and
 sets a 2048-process limit.
 
-Version 0.2 deliberately has no multi-host overlay, replication, automatic
+DComp provides no multi-host overlay, replication, automatic
 failover, payload inspection, protocol translation, encryption, arbitrary
 environment or privilege passthrough, or global long-lived daemon.

@@ -1,6 +1,6 @@
 # CLI and description-file reference
 
-This document is the complete user-facing reference for the DComp 0.2 command
+This document is the complete user-facing reference for the DComp 0.3 command
 line, `system.dcomp`, and `component.dcomp`. For the component process contract,
 see [Component contract](component-contract.md). For transaction and recovery
 semantics, see [Lifecycle and recovery](lifecycle.md).
@@ -76,6 +76,86 @@ If the same resolved target and runtime root already have an interrupted apply,
 `up` resumes it. A different target first resolves and safely supersedes the
 old operation. See [Lifecycle and recovery](lifecycle.md) for the exact phase
 model.
+
+### Incremental edits
+
+Global options still precede the command; command options precede positional
+arguments. These commands operate on committed state and do not edit a source
+file. They wait for concurrent lifecycle operations with cancellation support;
+if a previous operation is incomplete, they fail and direct callers to
+`resume`/`abort`. `up FILE` continues to replace the complete desired system.
+
+Existing images remain pinned to their committed IDs. Use the same state
+root and runtime root as the running system.
+
+### `add-component`
+
+```text
+dcomp [GLOBAL_OPTIONS] add-component [OPTIONS] SYSTEM NAME PATH
+```
+
+`add-component` loads `PATH` as a component directory or manifest and rejects
+an existing instance name. It creates the system if absent, creates and mounts
+its proxy endpoints, and starts the new container. Options:
+
+- `--link INPUT=TARGET` supplies a direct or `@GLOBAL` input target; repeatable.
+- `--bind SOURCE,TARGET,ro|rw` mounts a host path; repeatable. Sources are relative
+  to the caller's working directory, then resolved through symlinks.
+- `--volume NAME,TARGET,ro|rw` adds a persistent logical volume; repeatable.
+- `--arg VALUE` supplies one literal command argument; repeatable. Use
+  `--arg=--option` for arguments beginning with a dash.
+- `--egress` enables the component's dedicated external network.
+- `--publish PROTOCOL,HOST_IP,HOST_PORT,CONTAINER_PORT` publishes a port;
+  repeatable, and requires `--egress`.
+
+Comma-separated mount/publication fields cannot themselves contain commas.
+The Go API accepts structured values. Existing mount, image health-check,
+volume, security and publication validation applies. Unlinked inputs are valid
+and close connections until wired.
+
+### `rm-component`
+
+```text
+dcomp [GLOBAL_OPTIONS] rm-component SYSTEM NAME
+```
+
+`rm-component` rejects an unknown name. It removes that container and its
+endpoints, drops wires to/from its direct endpoints, and leaves every global
+name it exported declared but unbound. Consumers referencing those global
+names keep their symbolic wires. Other components and persistent volumes
+survive. Removing the last component leaves an empty, editable system.
+
+### `mod-wire`
+
+```text
+dcomp [GLOBAL_OPTIONS] mod-wire SYSTEM COMPONENT.INPUT COMPONENT.OUTPUT|@GLOBAL|-
+```
+
+`mod-wire` replaces the target of exactly one existing input. `-` disconnects
+it. `@NAME` is always a symbolic global reference; `COMPONENT.OUTPUT` is always
+direct. A global reference must name a declared global of the input's service
+type. A direct target must exist and have that same service type.
+
+### `assign-global`
+
+```text
+dcomp [GLOBAL_OPTIONS] assign-global [--service TYPE] SYSTEM NAME COMPONENT.OUTPUT|-
+```
+
+`assign-global` creates or changes a global output name. A new bound name's
+service type is inferred from its target; `--service` can explicitly assert it.
+`-` unbinds an existing name, or declares a new unbound name when `--service` is
+provided. Names use `[a-z][a-z0-9_-]{0,62}` and are scoped to one system and state
+root. A global targets one specific output; alias chains and input targets are
+rejected. `assign-global` preserves an existing name's service type.
+
+### Go lifecycle API
+
+The Go API exposes `Controller.AddComponent`, `RemoveComponent`, `ModifyWire`,
+`AssignGlobal`, and `Edit`. `Edit` runs a composition callback under the system's
+exclusive lock and applies the complete batch as one recoverable operation.
+Callbacks must not invoke nested lifecycle operations or retain the mutable
+specification for later use.
 
 ### `ps`
 
@@ -278,7 +358,8 @@ Description files are deliberately not a shell language:
 Consequently, a token cannot contain whitespace or `#`.
 
 System, component-instance, endpoint, and logical-volume names use
-`[a-z][a-z0-9-]{0,62}`. A nominal service identifier contains at least two
+`[a-z][a-z0-9-]{0,62}`. Global interface names additionally allow underscores:
+`[a-z][a-z0-9_-]{0,62}`. A nominal service identifier contains at least two
 dot-separated protobuf-style identifiers. DComp compares service identifiers
 for exact equality but does not inspect schemas or application bytes.
 
@@ -322,10 +403,11 @@ volume INSTANCE LOGICAL_NAME TARGET ro|rw
 args INSTANCE ARG...
 publish INSTANCE tcp|udp HOST_IP HOST_PORT CONTAINER_PORT
 egress INSTANCE
-link INSTANCE.INPUT INSTANCE.OUTPUT
+global NAME SERVICE [INSTANCE.OUTPUT]
+link INSTANCE.INPUT INSTANCE.OUTPUT|@GLOBAL
 ```
 
-`system` is required exactly once, and at least one component is required.
+`system` is required exactly once, and an empty system is allowed.
 Although final graph validation is order-independent, put `system` first and
 declare a component before any `bind`, `volume`, `args`, `publish`, or `egress`
 directive referring to it.
@@ -341,15 +423,37 @@ directory or its exact `component.dcomp`. Relative paths are resolved from the
 directory containing the system file. Instance names are unique, and the same
 component definition may be instantiated under several names.
 
+### `global`
+
+```text
+global NAME SERVICE [INSTANCE.OUTPUT]
+```
+
+Declare one system-global name for a specific output interface. `SERVICE` must
+match the target output's nominal service identifier. Omit the target to leave
+the name unbound. Names are unique within the system; globals cannot target
+inputs or other globals.
+
+A link to `@NAME` retains that symbolic reference. Reassigning the name changes
+its consumers' resolved routes without editing their links. Streams whose
+concrete route changes close on both sides; applications reconnect through the
+same input sockets. An unbound global closes input connections immediately,
+without a protocol-specific response frame. Docker health and operational
+status do not imply that every global is bound.
+
 ### `link`
 
 ```text
-link CONSUMER.INPUT PROVIDER.OUTPUT
+link CONSUMER.INPUT PROVIDER.OUTPUT|@GLOBAL
 ```
 
-Connect exactly one input to one output with an identical nominal service
-identifier. Every declared input must have exactly one link. Outputs may be
-unused or linked from several inputs, and cycles are valid.
+Connect an input to a concrete output or a declared global with the identical
+nominal service identifier. An input may have zero or one link. Outputs may
+be unused or linked from several inputs, and cycles are valid.
+
+`PROVIDER.OUTPUT` always names that specific component output; `@GLOBAL`
+always follows that global's assignment. An unlinked input closes connections
+immediately. Adding or reassigning a global never changes a direct wire.
 
 The link authorizes only these orchestrator-owned endpoint sockets. It does not
 create a Docker network or grant general connectivity between the containers.
@@ -436,3 +540,43 @@ link filter.documents source.documents
 
 Run `dcomp check system.dcomp` before `up` to resolve images and validate the
 complete authored and image-derived contract without changing runtime state.
+
+## Proxy control protocol 2
+
+The host-only `proxy.sock` accepts one newline-delimited JSON request per
+connection and replies with one status document. The 16 MiB message bound and
+30-second request deadline apply. Every command carries `instance_id` and
+`protocol_version: 2`. These are identity/version checks; host socket access is
+the trust boundary.
+
+`status`, `shutdown`, and authoritative `resync` retain their meanings. `resync`
+carries the complete `wiring` and its canonical digest. Wiring now optionally
+includes `globals` (`name`, `output_component`, `output_endpoint`); an unbound
+global has empty output fields. A symbolic link has `global` and empty output
+fields, while retaining its concrete input fields. Direct links are unchanged.
+
+Incremental proxy commands operate on the current wiring under the same lock
+as resync and shutdown:
+
+```json
+{"command":"assign-global","instance_id":"...","protocol_version":2,"global":{"name":"provider_endpoint","output_component":"provider","output_endpoint":"api"}}
+{"command":"mod-wire","instance_id":"...","protocol_version":2,"wire":{"link":{"input_component":"team","input_endpoint":"inference","global":"provider_endpoint"}}}
+{"command":"mod-wire","instance_id":"...","protocol_version":2,"wire":{"link":{"input_component":"team","input_endpoint":"inference"},"disconnect":true}}
+```
+
+Either edit can include `expected_digest` to reject a stale update. Without it,
+the edit applies to current wiring at execution time. Invalid requests leave
+wiring unchanged. Successful edits persist the symbolic configuration before
+reporting ready. Retrying the same assignment/edit converges after interrupted
+publication. Status optionally reports the global assignments in `globals`;
+link metrics describe currently resolved concrete routes. Unbound global links
+have no concrete route or link metric. During a transition, readiness is false
+and the digest is absent.
+
+This is a data-plane protocol: it does not create Docker containers, check
+application service types, or update the controller's durable lifecycle state.
+Use lifecycle CLI/API commands for managed systems; direct proxy edits are for
+controllers that coordinate their own desired state and resource lifecycle.
+In particular, do not bypass lifecycle state with raw edits and expect a later
+`up` to preserve them. Container creation/removal must retain the established
+socket publication and retirement ordering.

@@ -1,6 +1,6 @@
 # dcomp-component for Python
 
-This dependency-free package implements DComp 0.2's component-facing Unix
+This dependency-free package implements DComp 0.3.0's component-facing Unix
 socket contract. It does not depend on protobuf, gRPC, ConnectRPC, or a
 particular server framework.
 
@@ -74,7 +74,9 @@ with listener:
 
 Each `accept()` call connects to `DCOMP_OUT_FILTERED`, retries while the proxy
 is unavailable, and waits until the proxy pairs the stream with a real
-consumer. It returns the connection with the consumer's first byte untouched.
+consumer. It consumes the proxy header and returns
+`(connection, "component.input-endpoint")`, leaving all application bytes
+untouched. The address identifies the immediate consumer, not an end user.
 One returned socket represents one consumer connection; fan-out and reconnects
 therefore produce additional accepts.
 
@@ -141,10 +143,14 @@ DComp output path to those APIs: they would try to bind it. A framework-specific
 adapter must feed it the connected sockets instead; this package does not claim
 such an adapter for grpcio or an ASGI server.
 
-The listener adapter is intended for client-first protocols, where the
-consumer sends the first byte, including HTTP-like request/response protocols.
-A server-first protocol must use `connect_output()` directly and manage its
-desired number of producer connections explicitly.
+The listener adapter supports both client-first and server-first protocols:
+it returns when the proxy identifies the paired consumer, without waiting for
+an application byte.
+
+`connect_output()` is a raw transport helper: the returned socket includes
+the proxy header. Custom adapters using it must consume that header according
+to the [connection-origin contract](../../docs/component-contract.md#connection-origin).
+Ordinary servers should use `DialListener`.
 
 ## API summary
 

@@ -1,4 +1,4 @@
-// Package proxy implements the per-system DComp 0.2.1 data-plane proxy and
+// Package proxy implements the per-system DComp data-plane proxy and
 // the host process used to manage it.
 package proxy
 
@@ -17,7 +17,9 @@ import (
 	"github.com/glguida/dcomp/composition"
 )
 
-const ConfigVersion = 2
+// Version 4 adds symbolic global interfaces and permits unconnected inputs.
+// The output origin header introduced in 0.2.2 is unchanged.
+const ConfigVersion = 4
 
 func DefaultRuntimeRoot(stateRoot string) (string, error) {
 	if root := os.Getenv("DCOMP_RUNTIME_ROOT"); root != "" {
@@ -70,6 +72,7 @@ type Link struct {
 	InputEndpoint   string `json:"input_endpoint"`
 	OutputComponent string `json:"output_component"`
 	OutputEndpoint  string `json:"output_endpoint"`
+	Global          string `json:"global,omitempty"`
 }
 
 // Wiring is the canonical, process-independent data-plane content served by a
@@ -78,9 +81,10 @@ type Link struct {
 type Wiring struct {
 	Endpoints []EndpointIdentity `json:"endpoints"`
 	Links     []Link             `json:"links"`
+	Globals   []Global           `json:"globals,omitempty"`
 }
 
-// Config is the complete immutable wiring consumed by dcomp-proxy. InstanceID
+// Config is a complete wiring snapshot consumed by dcomp-proxy. InstanceID
 // identifies one launched process; Digest identifies the wiring independently
 // of that particular process.
 type Config struct {
@@ -91,6 +95,7 @@ type Config struct {
 	Digest     string     `json:"digest"`
 	Endpoints  []Endpoint `json:"endpoints"`
 	Links      []Link     `json:"links"`
+	Globals    []Global   `json:"globals,omitempty"`
 }
 
 // NewConfig converts a resolved composition into a deterministic proxy
@@ -131,6 +136,7 @@ func NewConfig(
 		})
 	}
 	config.Links = append(config.Links, wiring.Links...)
+	config.Globals = append([]Global(nil), wiring.Globals...)
 	config.canonicalize()
 	digest, err := config.computeDigest()
 	if err != nil {
@@ -165,8 +171,11 @@ func NewWiring(spec composition.ResolvedSpec) (Wiring, error) {
 	for _, link := range spec.Links {
 		wiring.Links = append(wiring.Links, Link{
 			InputComponent: link.Input.Component, InputEndpoint: link.Input.Endpoint,
-			OutputComponent: link.Output.Component, OutputEndpoint: link.Output.Endpoint,
+			OutputComponent: link.Output.Component, OutputEndpoint: link.Output.Endpoint, Global: link.Output.Global,
 		})
+	}
+	for _, global := range spec.Globals {
+		wiring.Globals = append(wiring.Globals, Global{Name: global.Name, OutputComponent: global.Target.Component, OutputEndpoint: global.Target.Endpoint})
 	}
 	wiring.canonicalize()
 	if err := wiring.Validate(); err != nil {
@@ -246,6 +255,7 @@ func (config Config) Wiring() Wiring {
 	wiring := Wiring{
 		Endpoints: make([]EndpointIdentity, 0, len(config.Endpoints)),
 		Links:     append([]Link(nil), config.Links...),
+		Globals:   append([]Global(nil), config.Globals...),
 	}
 	for _, endpoint := range config.Endpoints {
 		wiring.Endpoints = append(wiring.Endpoints, EndpointIdentity{
@@ -256,8 +266,8 @@ func (config Config) Wiring() Wiring {
 	return wiring
 }
 
-// Validate verifies that Wiring is a complete direct-link graph. Every input
-// is linked exactly once; outputs may be unused or shared by many inputs.
+// Validate verifies endpoints, globals, and direct or symbolic links. Inputs
+// have at most one target; outputs may be unused or shared by many inputs.
 func (wiring Wiring) Validate() error {
 	endpoints := make(map[string]EndpointIdentity, len(wiring.Endpoints))
 	for _, endpoint := range wiring.Endpoints {
@@ -276,6 +286,21 @@ func (wiring Wiring) Validate() error {
 		}
 		endpoints[key] = endpoint
 	}
+	globals := make(map[string]Global, len(wiring.Globals))
+	for _, global := range wiring.Globals {
+		if !composition.ValidGlobalName(global.Name) {
+			return fmt.Errorf("invalid global interface name %q", global.Name)
+		}
+		if _, exists := globals[global.Name]; exists {
+			return fmt.Errorf("global %s is declared more than once", global.Name)
+		}
+		if global.OutputComponent != "" || global.OutputEndpoint != "" {
+			if _, exists := endpoints[endpointKey(DirectionOutput, global.OutputComponent, global.OutputEndpoint)]; !exists {
+				return fmt.Errorf("global %s names unknown output", global.Name)
+			}
+		}
+		globals[global.Name] = global
+	}
 	linkedInputs := make(map[string]struct{}, len(wiring.Links))
 	for _, link := range wiring.Links {
 		inputKey := linkInputKey(link)
@@ -283,7 +308,14 @@ func (wiring Wiring) Validate() error {
 		if _, exists := endpoints[inputKey]; !exists {
 			return fmt.Errorf("proxy link names unknown input %s", inputKey)
 		}
-		if _, exists := endpoints[outputKey]; !exists {
+		if link.Global != "" {
+			if link.OutputComponent != "" || link.OutputEndpoint != "" {
+				return fmt.Errorf("proxy link mixes global and direct targets")
+			}
+			if _, exists := globals[link.Global]; !exists {
+				return fmt.Errorf("proxy link names unknown global %s", link.Global)
+			}
+		} else if _, exists := endpoints[outputKey]; !exists {
 			return fmt.Errorf("proxy link names unknown output %s", outputKey)
 		}
 		if _, exists := linkedInputs[inputKey]; exists {
@@ -291,13 +323,7 @@ func (wiring Wiring) Validate() error {
 		}
 		linkedInputs[inputKey] = struct{}{}
 	}
-	for key, endpoint := range endpoints {
-		if endpoint.Direction == DirectionInput {
-			if _, exists := linkedInputs[key]; !exists {
-				return fmt.Errorf("proxy input %s is not linked", key)
-			}
-		}
-	}
+
 	return nil
 }
 
@@ -306,6 +332,7 @@ func (wiring Wiring) Digest() (string, error) {
 	copy := wiring
 	copy.Endpoints = append([]EndpointIdentity(nil), wiring.Endpoints...)
 	copy.Links = append([]Link(nil), wiring.Links...)
+	copy.Globals = append([]Global(nil), wiring.Globals...)
 	copy.canonicalize()
 	if err := copy.Validate(); err != nil {
 		return "", err
@@ -318,6 +345,7 @@ func (wiring Wiring) Digest() (string, error) {
 }
 
 func (wiring *Wiring) canonicalize() {
+	sort.Slice(wiring.Globals, func(i, j int) bool { return wiring.Globals[i].Name < wiring.Globals[j].Name })
 	if wiring.Endpoints == nil {
 		wiring.Endpoints = make([]EndpointIdentity, 0)
 	}
@@ -337,6 +365,7 @@ func (wiring *Wiring) canonicalize() {
 }
 
 func (config *Config) canonicalize() {
+	sort.Slice(config.Globals, func(i, j int) bool { return config.Globals[i].Name < config.Globals[j].Name })
 	sort.Slice(config.Endpoints, func(i, j int) bool {
 		left, right := config.Endpoints[i], config.Endpoints[j]
 		return endpointKey(left.Direction, left.Component, left.Name) <

@@ -64,17 +64,12 @@ func TestValidateAcceptsCyclesAndOutputFanout(t *testing.T) {
 	}
 }
 
-func TestValidateRequiresEveryInputExactlyOnceWithMatchingService(t *testing.T) {
+func TestValidateRequiresUniqueLinksWithMatchingService(t *testing.T) {
 	tests := []struct {
 		name    string
 		mutate  func(*Spec)
 		message string
 	}{
-		{
-			name:    "unlinked input",
-			mutate:  func(spec *Spec) { spec.Links = nil },
-			message: "input consumer.upstream is not linked",
-		},
 		{
 			name: "duplicate input",
 			mutate: func(spec *Spec) {
@@ -145,11 +140,6 @@ func TestValidateRejectsInvalidSystemStructure(t *testing.T) {
 			name:    "invalid system name",
 			spec:    Spec{Name: "Demo", Components: []Instance{validComponent}},
 			message: "invalid system name",
-		},
-		{
-			name:    "no components",
-			spec:    Spec{Name: "demo"},
-			message: "has no components",
 		},
 		{
 			name: "invalid instance name",

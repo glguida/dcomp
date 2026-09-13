@@ -1,32 +1,92 @@
 /* The right-hand descriptor panel: mono blocks in the system-file idiom. */
 
 import { state } from "./state.js";
-import { escapeText } from "./iso.js";
+import { escapeText, escapeAttribute } from "./iso.js";
 
 export function renderPanel(plan) {
-  const doc = state.doc;
   const panel = document.getElementById("panel");
+  const focused = document.activeElement;
+  const focusedGlobal = panel.contains(focused) ? focused.dataset.global : null;
+  panel.innerHTML = selectionPanel(plan) + globalsPanel(state.doc);
+  // Polling replaces the markup; preserve keyboard focus on global controls.
+  if (focusedGlobal) {
+    for (const button of panel.querySelectorAll("[data-global]")) {
+      if (button.dataset.global === focusedGlobal) {
+        button.focus({ preventScroll: true });
+        break;
+      }
+    }
+  }
+}
+
+function selectionPanel(plan) {
+  const doc = state.doc;
   const selection = state.selection;
+  if (selection && selection.kind === "global") {
+    const global = (doc.globals || []).find(g => g.name === selection.id);
+    if (global) return globalPanel(global, doc);
+  }
   if (selection && selection.kind === "component" &&
       plan.byName.has(selection.id)) {
-    panel.innerHTML = componentPanel(plan.byName.get(selection.id));
-    return;
+    return componentPanel(plan.byName.get(selection.id));
   }
   if (selection && selection.kind === "link") {
     const route = plan.routes.find(r => r.id === selection.id);
-    if (route) { panel.innerHTML = linkPanel(route); return; }
+    if (route) return linkPanel(route);
   }
   if (selection && selection.kind === "port") {
     const html = portPanel(plan, selection.id);
-    if (html) { panel.innerHTML = html; return; }
+    if (html) return html;
   }
   if (selection && (selection.kind === "egress" ||
       selection.kind === "publish") && plan.byName.has(selection.id)) {
-    panel.innerHTML = externalPanel(
-      plan.byName.get(selection.id), selection.kind);
-    return;
+    return externalPanel(plan.byName.get(selection.id), selection.kind);
   }
-  panel.innerHTML = systemPanel(doc);
+  return systemPanel(doc);
+}
+
+function globalButton(name) {
+  const selected = state.selection && state.selection.kind === "global" &&
+    state.selection.id === name;
+  return '<button type="button" class="global-name" data-global="' +
+    escapeAttribute(name) + '" aria-pressed="' + Boolean(selected) + '">' +
+    escapeText("@" + name) + '</button>';
+}
+
+function globalsPanel(doc) {
+  if (!(doc.globals || []).length) return "";
+  return '<div class="rule"></div><h2>GLOBAL INTERFACES</h2>' +
+    '<div class="descriptor">' + doc.globals.map(global =>
+      globalButton(global.name) + " → " + escapeText(globalTarget(global))
+    ).join("\n") + '</div>';
+}
+
+function globalTarget(global) {
+  return global.target.component ?
+    global.target.component + "." + global.target.endpoint : "unbound";
+}
+
+function globalPanel(global, doc) {
+  const consumers = (doc.links || []).filter(link => link.global === global.name);
+  const lines = [
+    "global    @" + global.name,
+    "service   " + global.service,
+    "output    " + globalTarget(global),
+    ...consumers.map(link =>
+      "input     " + link.input.component + "." + link.input.endpoint),
+  ];
+  if (!consumers.length) lines.push("inputs    none");
+  return '<h2>GLOBAL INTERFACE</h2><div class="descriptor">' +
+    descriptorText(lines.join("\n")) + '</div>';
+}
+
+// Render symbolic references as native buttons wherever descriptors show them.
+function descriptorText(text) {
+  const names = new Set((state.doc.globals || []).map(global => global.name));
+  return text.split(/(@[a-z][a-z0-9_-]*)/g).map(part =>
+    part.startsWith("@") && names.has(part.slice(1)) ?
+      globalButton(part.slice(1)) : escapeText(part)
+  ).join("");
 }
 
 function externalPanel(node, kind) {
@@ -48,7 +108,7 @@ function externalPanel(node, kind) {
     "INBOUND ONLY, THROUGH THESE BINDINGS.<br>NO INTERNAL LINK.";
   return '<h2>' + (kind === "egress" ? "EGRESS" : "PUBLISH") +
     ' · <em>' + escapeText(spec.name.toUpperCase()) + "</em></h2>" +
-    '<div class="descriptor">' + escapeText(lines.join("\n")) + "</div>" +
+    '<div class="descriptor">' + descriptorText(lines.join("\n")) + "</div>" +
     '<div class="legend">' + note + "</div>";
 }
 
@@ -142,7 +202,7 @@ function componentPanel(node) {
     const link = (doc.links || []).find(l =>
       l.input.component === spec.name && l.input.endpoint === input.name);
     lines.push("input     " + input.name + "  " + input.service +
-      (link ? "  <- " + link.output.component + "." + link.output.endpoint : ""));
+      (link ? "  <- " + targetText(link) : ""));
   }
   for (const output of spec.outputs || []) {
     lines.push("output    " + output.name + "  " + output.service);
@@ -167,7 +227,7 @@ function componentPanel(node) {
   }
   return '<h2>COMPONENT · <em>' + escapeText(spec.name.toUpperCase()) +
     "</em></h2>" +
-    '<div class="descriptor">' + escapeText(lines.join("\n")) + "</div>" +
+    '<div class="descriptor">' + descriptorText(lines.join("\n")) + "</div>" +
     problem;
 }
 
@@ -175,7 +235,7 @@ function linkPanel(route) {
   const link = route.link;
   const lines = [
     "input     " + link.input.component + "." + link.input.endpoint,
-    "output    " + link.output.component + "." + link.output.endpoint,
+    "output    " + targetText(link),
     "service   " + link.service,
   ];
   if (typeof link.active === "boolean") {
@@ -193,7 +253,7 @@ function linkPanel(route) {
     }
   }
   return '<h2>LINK</h2>' +
-    '<div class="descriptor">' + escapeText(lines.join("\n")) + "</div>" +
+    '<div class="descriptor">' + descriptorText(lines.join("\n")) + "</div>" +
     '<div class="legend">ONE PRIVATE CHANNEL.<br>NOTHING ELSE IS REACHABLE.</div>';
 }
 
@@ -219,16 +279,21 @@ function portPanel(plan, key) {
   }
   for (const link of links) {
     lines.push(direction === "in" ?
-      "link      <- " + link.output.component + "." + link.output.endpoint :
+      "link      <- " + targetText(link) :
       "link      -> " + link.input.component + "." + link.input.endpoint);
   }
   const note = direction === "in" ?
-    "AN INPUT CONSUMES EXACTLY ONE LINKED OUTPUT." :
+    "AN INPUT CONSUMES AT MOST ONE LINKED OUTPUT." :
     (links.length ?
       "AN OUTPUT MAY FAN OUT TO SEVERAL INPUTS." :
       "DECLARED, NOT WIRED — NOTHING REACHES IT.");
   return '<h2>INTERFACE · <em>' + escapeText(portName.toUpperCase()) +
     "</em></h2>" +
-    '<div class="descriptor">' + escapeText(lines.join("\n")) + "</div>" +
+    '<div class="descriptor">' + descriptorText(lines.join("\n")) + "</div>" +
     '<div class="legend">' + note + "</div>";
+}
+
+function targetText(link) {
+  const target = link.output.component ? link.output.component + "." + link.output.endpoint : "unbound";
+  return link.global ? "@" + link.global + " -> " + target : target;
 }

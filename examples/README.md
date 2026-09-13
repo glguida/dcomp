@@ -1,4 +1,4 @@
-# DComp 0.2 examples
+# DComp examples
 
 The example system demonstrates a two-hop gRPC pipeline carried only by
 orchestrator-owned Unix sockets, plus one explicitly published auxiliary HTTP
@@ -47,7 +47,7 @@ outputs. None binds or listens on a DComp interface socket.
 
 The admin server is intentionally different: it calls `listen()` on an
 ordinary container TCP port supplied by the image. `publish` is the explicit
-host exposure for that non-DComp service. In the current 0.2 policy, Docker
+host exposure for that non-DComp service. Docker
 port publication requires the same component to declare `egress`, so
 `uppercase` receives its own externally routed bridge; `echo` and `caller`
 remain in Docker network mode `none`.
@@ -129,3 +129,63 @@ health and metrics routes, network mode `none` for components without egress,
 the uppercase component's single egress bridge, the absence of the old
 `DCOMP_LINK_*` environment, proxy survival across a component restart, and
 complete proxy/container/network cleanup during down.
+
+## Build the pipeline incrementally
+
+After building the binaries and images above, run these commands from the
+repository root. This uses a separate system named `incremental-demo`:
+
+```sh
+bin/dcomp add-component incremental-demo echo examples/echo
+bin/dcomp assign-global incremental-demo provider_endpoint echo.echo
+bin/dcomp add-component --link upstream=@provider_endpoint \
+  --arg=--repeat --arg 750ms --arg Hello \
+  incremental-demo caller examples/caller
+bin/dcomp view incremental-demo
+```
+
+The caller receives `Hello`. Insert the uppercase stage, with its upstream
+wired directly to the original output, then reassign the global:
+
+```sh
+bin/dcomp add-component --link upstream=echo.echo \
+  incremental-demo uppercase examples/uppercase
+bin/dcomp assign-global incremental-demo provider_endpoint uppercase.echo
+bin/dcomp view incremental-demo
+```
+
+New calls receive `HELLO`. The caller's wire remains `@provider_endpoint`;
+its resolved output is now `uppercase.echo`. No auxiliary HTTP port is
+published in this flow, so every component uses network mode `none`.
+
+```sh
+bin/dcomp rm-component incremental-demo uppercase
+bin/dcomp view incremental-demo
+bin/dcomp assign-global incremental-demo provider_endpoint echo.echo
+bin/dcomp down incremental-demo
+```
+
+Removing `uppercase` leaves the global unbound and its consumers connected to
+that name. Calls fail until reassignment restores the original provider.
+`make integration` also runs `tools/incremental-test`, which exercises this
+flow, direct-link isolation, single-wire edits, concurrent component additions,
+and reuse of an empty system.
+
+## Preview clickable global names
+
+No containers or image builds are needed for this preview. From the repository
+root, run:
+
+```sh
+bin/dcomp dashboard examples/global-system.dcomp
+```
+
+Open <http://127.0.0.1:8199>. Click `@provider_endpoint` in the sidebar to
+highlight `uppercase.echo`, `caller.upstream`, and their symbolic wire. The
+direct upstream wires remain unselected. Click `@pending_endpoint` to see an
+unbound global: its `waiting.upstream` consumer is highlighted without an
+output route. Click the name again or press Escape to clear the selection.
+
+This is a file preview, so it shows topology without live traffic. To run the
+same composition after `make examples`, use `bin/dcomp up
+examples/global-system.dcomp`, then `bin/dcomp dashboard globals-demo`.

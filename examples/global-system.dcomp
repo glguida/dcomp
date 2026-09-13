@@ -1,0 +1,21 @@
+system globals-demo
+
+component echo echo
+component uppercase uppercase
+component caller caller
+component direct caller
+component waiting caller
+
+# This global points at the output of the complete pipeline.
+global provider_endpoint dcomp.example.v1.Echo uppercase.echo
+# An unbound name still has a consumer to highlight.
+global pending_endpoint dcomp.example.v1.Echo
+
+link uppercase.upstream echo.echo
+link caller.upstream @provider_endpoint
+link direct.upstream echo.echo
+link waiting.upstream @pending_endpoint
+
+args caller --repeat 750ms global-demo
+args direct --repeat 750ms direct-demo
+args waiting --repeat 750ms waiting-demo

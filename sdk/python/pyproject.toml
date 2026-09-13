@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dcomp-component"
-version = "0.2.0"
+version = "0.3.0"
 description = "Dependency-free Python helpers for DComp component sockets"
 readme = "README.md"
 requires-python = ">=3.10"

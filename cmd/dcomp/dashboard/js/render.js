@@ -107,6 +107,15 @@ function bindStage() {
     state.selection = hit ? { kind: hit.dataset.kind, id: hit.dataset.id } : null;
     render();
   };
+  document.getElementById("panel").onclick = event => {
+    const hit = event.target.closest("[data-global]");
+    if (!hit) return;
+    const selected = state.selection;
+    state.selection = selected && selected.kind === "global" &&
+      selected.id === hit.dataset.global ? null :
+      { kind: "global", id: hit.dataset.global };
+    render();
+  };
   stage.classList.toggle("lost", state.lost);
 }
 
@@ -261,6 +270,9 @@ function renderExternalPort(svg, external) {
 function routeSelected(plan, route) {
   const selection = state.selection;
   if (!selection) return false;
+  if (selection.kind === "global") {
+    return selection.id === route.link.global;
+  }
   if (selection.kind === "link") return selection.id === route.id;
   if (selection.kind === "port") {
     return (plan.portRoutes.get(selection.id) || []).includes(route.id);
@@ -437,6 +449,19 @@ function hazardRing(group, x0, y0, x1, y1) {
   }
 }
 
+function globalPortSelected(direction, component, endpoint) {
+  const selection = state.selection;
+  if (!selection || selection.kind !== "global") return false;
+  const global = (state.doc.globals || []).find(g => g.name === selection.id);
+  if (!global) return false;
+  if (direction === "out") {
+    return global.target.component === component && global.target.endpoint === endpoint;
+  }
+  // Symbolic consumers remain selectable even while the name is unbound.
+  return (state.doc.links || []).some(link => link.global === global.name &&
+    link.input.component === component && link.input.endpoint === endpoint);
+}
+
 /* Every declared endpoint is drawn, linked or not: open square input, filled
    square output, on the visible faces, named in mono, clickable. An unlinked
    port is drawn faded — declared but not wired. */
@@ -449,8 +474,9 @@ function renderNodePorts(svg, plan, node) {
     for (const [name, port] of ports) {
       const key = direction + ":" + node.spec.name + ":" + name;
       const linked = plan.portRoutes.has(key);
-      const selected = state.selection &&
-        state.selection.kind === "port" && state.selection.id === key;
+      const globalSelected = globalPortSelected(direction, node.spec.name, name);
+      const selected = globalSelected || (state.selection &&
+        state.selection.kind === "port" && state.selection.id === key);
       const [x, y] = iso(port.x, port.y, 1);
       const face = geometry[direction];
       const opacity = linked || selected ? 1 : 0.45;
@@ -470,7 +496,8 @@ function renderNodePorts(svg, plan, node) {
       if (selected) {
         parts.push('<polygon points="' +
           pts(surfaceQuad(face.pad, [x, y], -9, 9, -3, 11)) +
-          '" fill="none" stroke="' + INK + '" stroke-width="2"/>');
+          '" fill="none" stroke="' + (globalSelected ? ROSSO : INK) +
+          '" stroke-width="2"/>');
       }
       /* The socket is on the vertical face; its name is printed immediately
          inside the matching top edge and centered on the socket. Turning the

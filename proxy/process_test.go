@@ -46,7 +46,7 @@ func TestVerifyStatusIdentityRequiresCurrentProxyVersion(t *testing.T) {
 	if err := verifyStatusIdentity(process, status); err != nil {
 		t.Fatalf("verify current status: %v", err)
 	}
-	for _, version := range []int{1, ConfigVersion + 1} {
+	for _, version := range []int{1, 2, ConfigVersion + 1} {
 		status.Version = version
 		if err := verifyStatusIdentity(process, status); err == nil {
 			t.Fatalf("proxy status version %d was accepted", version)
@@ -136,7 +136,7 @@ func TestEnsureRefusesRuntimeCleanupWhileRecordedProxyPIDIsLive(t *testing.T) {
 }
 
 func TestEnsureRejectsUnsupportedConfigWithoutMutatingRuntime(t *testing.T) {
-	for _, version := range []int{1, ConfigVersion + 1} {
+	for _, version := range []int{1, 2, ConfigVersion + 1} {
 		t.Run(fmt.Sprintf("version-%d", version), func(t *testing.T) {
 			current := testConfig(t, false)
 			unsupported := current

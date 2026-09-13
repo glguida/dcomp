@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/glguida/dcomp/composition"
+	"github.com/glguida/dcomp/internal/runtimecontract"
 )
 
 func TestProxyForwardsBidirectionallyAndReconnects(t *testing.T) {
@@ -34,6 +35,7 @@ func TestProxyForwardsBidirectionallyAndReconnects(t *testing.T) {
 		producer := dialUnix(t, HostSocket(config.RuntimeDir, DirectionOutput, "source", "documents"))
 		consumer := dialUnix(t, HostSocket(config.RuntimeDir, DirectionInput, "filter", "documents"))
 
+		assertOrigin(t, producer, "filter.documents")
 		writeAndRead(t, consumer, producer, "request")
 		writeAndRead(t, producer, consumer, "response")
 		_ = consumer.Close()
@@ -59,6 +61,7 @@ func TestProxyReportsPerLinkConnectionAndByteMetrics(t *testing.T) {
 	))
 	defer filterProducer.Close()
 	defer filterConsumer.Close()
+	assertOrigin(t, filterProducer, "filter.documents")
 	writeAndRead(t, filterConsumer, filterProducer, "filter request")
 	writeAndRead(t, filterProducer, filterConsumer, "filter response")
 
@@ -70,6 +73,7 @@ func TestProxyReportsPerLinkConnectionAndByteMetrics(t *testing.T) {
 	))
 	defer archiveProducer.Close()
 	defer archiveConsumer.Close()
+	assertOrigin(t, archiveProducer, "archive.documents")
 	writeAndRead(t, archiveConsumer, archiveProducer, "archive request")
 	writeAndRead(t, archiveProducer, archiveConsumer, "archive response")
 
@@ -159,7 +163,7 @@ func TestForwardLogsCopyErrorsAndReleasesPair(t *testing.T) {
 	defer cancel()
 	forwarded := make(chan struct{})
 	go func() {
-		server.forward(ctx, "input/client/upstream", "output/server/api", consumer, producer)
+		server.forwardWithMetrics(ctx, "input/client/upstream", "output/server/api", "client.upstream", consumer, producer, nil)
 		close(forwarded)
 	}()
 
@@ -199,6 +203,7 @@ func TestProxyFanoutUsesIndependentBidirectionalConnections(t *testing.T) {
 
 	// Output connections are pooled in acceptance order. Each consumer gets a
 	// dedicated stream; neither request is broadcast onto the other stream.
+	assertOrigin(t, producerA, "filter.documents")
 	writeAndRead(t, consumerA, producerA, "filter-request")
 	writeAndRead(t, producerA, consumerA, "filter-response")
 
@@ -206,6 +211,7 @@ func TestProxyFanoutUsesIndependentBidirectionalConnections(t *testing.T) {
 	consumerB := dialUnix(t, HostSocket(config.RuntimeDir, DirectionInput, "archive", "documents"))
 	defer producerB.Close()
 	defer consumerB.Close()
+	assertOrigin(t, producerB, "archive.documents")
 	writeAndRead(t, consumerB, producerB, "archive-request")
 	writeAndRead(t, producerB, consumerB, "archive-response")
 }
@@ -234,7 +240,7 @@ func TestControlStatusAndShutdown(t *testing.T) {
 }
 
 func TestControlRequiresCurrentProtocolVersionForEveryCommand(t *testing.T) {
-	commands := []string{"status", "shutdown", "resync", "unknown"}
+	commands := []string{"status", "shutdown", "resync", "mod-wire", "assign-global", "unknown"}
 	versions := []struct {
 		name    string
 		version int
@@ -343,6 +349,7 @@ func TestSecondProxyCannotReplaceLiveSockets(t *testing.T) {
 	consumer := dialUnix(t, HostSocket(config.RuntimeDir, DirectionInput, "filter", "documents"))
 	defer producer.Close()
 	defer consumer.Close()
+	assertOrigin(t, producer, "filter.documents")
 	writeAndRead(t, consumer, producer, "still-live")
 }
 
@@ -389,6 +396,7 @@ func TestResyncPreservesRetainedInodesStreamsAndMetrics(t *testing.T) {
 	consumer := dialUnix(t, consumerPath)
 	defer producer.Close()
 	defer consumer.Close()
+	assertOrigin(t, producer, "filter.documents")
 	writeAndRead(t, consumer, producer, "before")
 
 	target := config.Wiring()
@@ -472,6 +480,7 @@ func TestRemovedThenReaddedLinkMetricsRestartAtZero(t *testing.T) {
 	consumer := dialUnix(t, HostSocket(
 		config.RuntimeDir, DirectionInput, "archive", "documents",
 	))
+	assertOrigin(t, producer, "archive.documents")
 	writeAndRead(t, consumer, producer, "request-before-removal")
 	writeAndRead(t, producer, consumer, "response-before-removal")
 	_ = consumer.Close()
@@ -551,6 +560,7 @@ func TestResyncClosesRemovedLinkPairOnBothSides(t *testing.T) {
 	))
 	defer producer.Close()
 	defer consumer.Close()
+	assertOrigin(t, producer, "archive.documents")
 	writeAndRead(t, consumer, producer, "paired")
 
 	target := config.Wiring()
@@ -640,6 +650,7 @@ func TestResyncRetainsFanInOutputPoolUntilLastConsumerIsRemoved(t *testing.T) {
 	consumer := dialUnix(t, HostSocket(
 		config.RuntimeDir, DirectionInput, "archive", "documents",
 	))
+	assertOrigin(t, producer, "archive.documents")
 	writeAndRead(t, consumer, producer, "survived")
 	_ = consumer.Close()
 	_ = producer.Close()
@@ -718,6 +729,7 @@ func TestProducerReconnectClosesWhenOutputHasNoConsumers(t *testing.T) {
 		config.RuntimeDir, DirectionInput, "filter", "documents",
 	))
 	defer consumer.Close()
+	assertOrigin(t, producer, "filter.documents")
 	writeAndRead(t, consumer, producer, "available again")
 }
 
@@ -969,7 +981,9 @@ func TestConcurrentPairRegistrationObservesCompleteRelink(t *testing.T) {
 	if !completed.status.Ready || completed.status.Digest != digest {
 		t.Fatalf("resync status = %#v", completed.status)
 	}
+	assertOrigin(t, producerY, "consumer-a.stream")
 	writeAndRead(t, consumerA, producerY, "a-to-y")
+	assertOrigin(t, producerX, "consumer-b.stream")
 	writeAndRead(t, consumerB, producerX, "b-to-x")
 }
 
@@ -1262,6 +1276,7 @@ func TestShortenedPathResyncPublishesRoutesAndPreservesRetainedInodes(t *testing
 
 	producer := dialUnix(t, socketListenPath(outputPath))
 	consumer := dialUnix(t, archiveActual)
+	assertOrigin(t, producer, "archive.documents")
 	writeAndRead(t, consumer, producer, "shortened-resync")
 	_ = consumer.Close()
 	_ = producer.Close()
@@ -1824,6 +1839,41 @@ func controlRoundTrip(t *testing.T, runtimeDir string, request ControlRequest) S
 		t.Fatal(err)
 	}
 	return response
+}
+
+func TestForwardCancellationInterruptsOriginWrite(t *testing.T) {
+	consumer, consumerPeer := net.Pipe()
+	producer, producerPeer := net.Pipe()
+	defer consumerPeer.Close()
+	defer producerPeer.Close()
+	server := &server{connections: make(map[net.Conn]struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		server.forwardWithMetrics(ctx, "input/client/api", "output/server/api", "client.api", consumer, producer, nil)
+		close(done)
+	}()
+	// Read only one header byte, leaving the proxy blocked in its write.
+	_ = producerPeer.SetReadDeadline(time.Now().Add(time.Second))
+	var first [1]byte
+	if _, err := io.ReadFull(producerPeer, first[:]); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("cancellation did not interrupt the origin write")
+	}
+}
+
+func assertOrigin(t *testing.T, connection net.Conn, want string) {
+	t.Helper()
+	got, err := runtimecontract.ReadOrigin(connection)
+	if err != nil || got != want {
+		t.Fatalf("origin = %q, %v; want %q", got, err, want)
+	}
 }
 
 func writeAndRead(t *testing.T, writer, reader net.Conn, value string) {
