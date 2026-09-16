@@ -465,6 +465,7 @@ func TestCreateContainerUsesExactLaunchResourcesAndFixedPolicy(t *testing.T) {
 				"Name":  "/worker",
 				"Image": "sha256:image-id",
 				"Config": map[string]interface{}{
+					"User":      "1001:1002",
 					"Labels":    map[string]string{"io.dcomp.owner": "test"},
 					"Cmd":       []string{"serve", "--listen=:50051"},
 					"Env":       []string{"A_FIRST=a", "Z_LAST=z"},
@@ -525,6 +526,7 @@ func TestCreateContainerUsesExactLaunchResourcesAndFixedPolicy(t *testing.T) {
 	}))
 
 	container, err := client.CreateContainer(context.Background(), engine.ContainerRequest{
+		User:           "1001:1002",
 		Name:           "worker",
 		ImageID:        "sha256:image-id",
 		NetworkID:      "network-id",
@@ -567,6 +569,7 @@ func TestCreateContainerUsesExactLaunchResourcesAndFixedPolicy(t *testing.T) {
 	}
 
 	wantBody := map[string]interface{}{
+		"User":      "1001:1002",
 		"Image":     "sha256:image-id",
 		"Env":       []interface{}{"A_FIRST=a", "Z_LAST=z"},
 		"Cmd":       []interface{}{"serve", "--listen=:50051"},
@@ -623,6 +626,9 @@ func TestCreateContainerUsesExactLaunchResourcesAndFixedPolicy(t *testing.T) {
 	}
 	if container.ImageID != "sha256:image-id" {
 		t.Fatalf("inspected image ID = %q", container.ImageID)
+	}
+	if container.User != "1001:1002" {
+		t.Fatalf("inspected user = %q", container.User)
 	}
 	wantAttachment := engine.NetworkAttachment{
 		NetworkID: "", Aliases: []string{"backend", "provider"},

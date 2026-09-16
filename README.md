@@ -1,4 +1,4 @@
-<img src="docs/assets/banner.svg" alt="dcomp — Components, wired by hand. A Docker component substrate. V0.3.0, MIT, Linux, Docker Engine 25+." width="100%">
+<img src="docs/assets/banner.svg" alt="dcomp — Components, wired by hand. A Docker component substrate. V0.3.1, MIT, Linux, Docker Engine 25+." width="100%">
 
 # DComp
 
@@ -98,6 +98,11 @@ another incremental edit. The Go `lifecycle.Controller` exposes the same
 operations and an `Edit` callback for a batch of composition changes applied
 as one recoverable operation. Docker changes are not an atomic transaction;
 an interrupted apply requires `resume` or `abort`.
+
+Version 0.3.1 adds `add-component --user UID:GID` and the system directive
+`user COMPONENT UID:GID` for running a container with an explicit identity.
+Incremental edits preserve existing mounted containers when an old host bind
+path has moved; new or recreated containers still require valid source paths.
 
 Reassignment disconnects streams whose concrete route changed; subsequent
 connections use the new output. Unaffected streams and endpoint socket inodes
@@ -326,7 +331,7 @@ Per-link Docker bridges and `DCOMP_LINK_*` are removed completely.
 
 ## Deliberate limits
 
-DComp 0.3.0 provides no multi-host overlay, replicas, automatic failover,
+DComp 0.3.1 provides no multi-host overlay, replicas, automatic failover,
 encryption, arbitrary Docker option passthrough, secret store, image build/pull
 workflow, or long-lived control-plane daemon. Unix
 socket permissions are the local trust boundary; optional peer-credential

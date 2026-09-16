@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/glguida/dcomp/internal/runtimecontract"
@@ -70,6 +71,7 @@ type PublishedPort struct {
 // Runtime is the bounded, normalized host policy for one component instance.
 // Args replaces the image command arguments, but never its entrypoint.
 type Runtime struct {
+	User           string          `json:"user,omitempty"`
 	Binds          []BindMount     `json:"binds,omitempty"`
 	Volumes        []VolumeMount   `json:"volumes,omitempty"`
 	Args           []string        `json:"args,omitempty"`
@@ -152,13 +154,24 @@ func ValidateComponent(component Component) error {
 	return ValidateDefinition(component.Definition)
 }
 
-// ValidateRuntime verifies one normalized component runtime independently of a
-// system. Bind sources must already have been made absolute and canonical by
-// the system parser.
+// ValidateRuntime verifies runtime structure without accessing host resources.
+// Bind sources are checked against the filesystem when a mount is prepared.
 func ValidateRuntime(runtime Runtime) error {
+	if runtime.User != "" {
+		ids := strings.Split(runtime.User, ":")
+		if len(ids) != 2 {
+			return fmt.Errorf("user must be numeric UID:GID")
+		}
+		for _, id := range ids {
+			value, err := strconv.ParseUint(id, 10, 32)
+			if err != nil || value == 4294967295 || strconv.FormatUint(value, 10) != id {
+				return fmt.Errorf("user must be numeric UID:GID")
+			}
+		}
+	}
 	targets := make([]string, 0, len(runtime.Binds)+len(runtime.Volumes))
 	for _, bind := range runtime.Binds {
-		if err := validateBindSource(bind.Source); err != nil {
+		if err := validateBindPath(bind.Source); err != nil {
 			return fmt.Errorf("bind source %q: %w", bind.Source, err)
 		}
 		if err := validateMountTarget(bind.Target); err != nil {
@@ -584,12 +597,33 @@ func validProtobufService(service string) bool {
 	return servicePattern.MatchString(service)
 }
 
-func validateBindSource(source string) error {
+func validateBindPath(source string) error {
 	if source == "" || !filepath.IsAbs(source) {
 		return fmt.Errorf("must be absolute")
 	}
 	if clean := filepath.Clean(source); clean != source {
 		return fmt.Errorf("must be clean (use %q)", clean)
+	}
+	if strings.IndexByte(source, 0) >= 0 {
+		return fmt.Errorf("contains a NUL byte")
+	}
+	return nil
+}
+
+// ValidateBindSources checks host resources for a new or recreated container.
+// Recorded mounts on retained containers do not require the old path to exist.
+func ValidateBindSources(runtime Runtime) error {
+	for _, bind := range runtime.Binds {
+		if err := validateBindSource(bind.Source); err != nil {
+			return fmt.Errorf("bind source %q: %w", bind.Source, err)
+		}
+	}
+	return nil
+}
+
+func validateBindSource(source string) error {
+	if err := validateBindPath(source); err != nil {
+		return err
 	}
 	canonical, err := filepath.EvalSymlinks(source)
 	if err != nil {
@@ -714,6 +748,7 @@ func cloneDefinition(input Definition) Definition {
 
 func cloneRuntime(input Runtime) Runtime {
 	return Runtime{
+		User:           input.User,
 		Binds:          append([]BindMount(nil), input.Binds...),
 		Volumes:        append([]VolumeMount(nil), input.Volumes...),
 		Args:           append([]string(nil), input.Args...),

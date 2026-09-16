@@ -178,6 +178,9 @@ func verifyContainerCore(
 			component.ImageID,
 		)
 	}
+	if component.Runtime.User != "" && actual.User != component.Runtime.User {
+		return fmt.Errorf("%s has unexpected user %q, expected %q", component.Name, actual.User, component.Runtime.User)
+	}
 	expected := expectedContainerLabels(scope, component, "")
 	for key, value := range expected {
 		if actual.Labels[key] != value {

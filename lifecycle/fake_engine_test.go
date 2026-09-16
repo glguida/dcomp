@@ -605,6 +605,7 @@ func (fake *fakeEngine) CreateContainer(
 	fake.nextContainer++
 	id := fmt.Sprintf("container-%d", fake.nextContainer)
 	container := engine.Container{
+		User:          request.User,
 		ID:            id,
 		Name:          request.Name,
 		ImageID:       request.ImageID,

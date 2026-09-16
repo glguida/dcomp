@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -216,5 +218,48 @@ func TestInvalidIncrementalEditsLeaveDesiredUnchanged(t *testing.T) {
 			t.Fatal("invalid edit changed desired state")
 		}
 		requireNoOperation(t, controller.State, "demo")
+	}
+}
+
+func TestEditsAfterMountedWorkspaceMoves(t *testing.T) {
+	controller, fake := newControllerHarness(t)
+	installEditImages(fake, "provider", "consumer", "wrapper")
+	ctx := context.Background()
+	directory := filepath.Join(t.TempDir(), "workspace")
+	if err := os.Mkdir(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	spec := linkedSpec("provider:v1", "consumer:v1")
+	for i := range spec.Components {
+		spec.Components[i].Runtime.Binds = []composition.BindMount{{Source: directory, Target: "/workspace"}}
+	}
+	if err := controller.Up(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	before := requireDesired(t, controller.State, "demo")
+	if err := os.Rename(directory, directory+"-moved"); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.AddComponent(ctx, "demo", component("wrapper", "wrapper:v1", nil, nil), nil); err != nil {
+		t.Fatal(err)
+	}
+	after := requireDesired(t, controller.State, "demo")
+	for name, resource := range before.Containers {
+		if after.Containers[name].ID != resource.ID {
+			t.Fatalf("%s was replaced", name)
+		}
+	}
+	invalid := component("invalid", "wrapper:v1", nil, nil)
+	invalid.Runtime.Binds = []composition.BindMount{{Source: directory, Target: "/workspace"}}
+	if err := controller.AddComponent(ctx, "demo", invalid, nil); err == nil {
+		t.Fatal("new component accepted missing workspace")
+	}
+	if _, exists, err := controller.State.ReadOperation("demo"); err != nil || exists {
+		t.Fatalf("invalid addition left an operation: %v %v", exists, err)
+	}
+	for _, name := range []string{"consumer", "provider", "wrapper"} {
+		if err := controller.RemoveComponent(ctx, "demo", name); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

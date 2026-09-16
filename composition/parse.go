@@ -244,6 +244,22 @@ func Parse(reader io.Reader, baseDir string) (Spec, error) {
 					lineNumber, "component %q runtime: %v", fields[1], err,
 				)
 			}
+		case "user":
+			if len(fields) != 3 {
+				return Spec{}, lineError(lineNumber, "expected user INSTANCE UID:GID")
+			}
+			index, err := declaredInstance(componentIndexes, fields[1], fields[0])
+			if err != nil {
+				return Spec{}, lineError(lineNumber, "%v", err)
+			}
+			runtime := &spec.Components[index].Runtime
+			if runtime.User != "" {
+				return Spec{}, lineError(lineNumber, "user is already set for %s", fields[1])
+			}
+			runtime.User = fields[2]
+			if err := ValidateRuntime(*runtime); err != nil {
+				return Spec{}, lineError(lineNumber, "%v", err)
+			}
 		case "egress":
 			if len(fields) != 2 {
 				return Spec{}, lineError(lineNumber, "expected egress INSTANCE")

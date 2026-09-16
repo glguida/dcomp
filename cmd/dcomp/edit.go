@@ -84,6 +84,7 @@ func runAddComponent(ctx context.Context, controller *lifecycle.Controller, args
 	flags.Var(&ports, "publish", "tcp|udp,HOST_IP,HOST_PORT,CONTAINER_PORT (repeatable)")
 	flags.Var(&arguments, "arg", "literal command argument (repeatable)")
 	egress := flags.Bool("egress", false, "enable external network access")
+	user := flags.String("user", "", "container user as numeric UID:GID (default: image user)")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -95,7 +96,7 @@ func runAddComponent(ctx context.Context, controller *lifecycle.Controller, args
 		return commandError(err, ctx)
 	}
 	instance := composition.Instance{Name: flags.Arg(1), Component: component,
-		Runtime: composition.Runtime{Args: arguments, ExternalEgress: *egress}}
+		Runtime: composition.Runtime{User: *user, Args: arguments, ExternalEgress: *egress}}
 	for _, item := range binds {
 		parts, err := mountFields(item)
 		if err != nil {

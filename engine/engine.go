@@ -50,6 +50,7 @@ const (
 )
 
 type Container struct {
+	User     string
 	ID       string
 	Name     string
 	ImageID  string
@@ -147,6 +148,7 @@ type VolumeRequest struct {
 }
 
 type ContainerRequest struct {
+	User           string
 	Name           string
 	ImageID        string
 	NetworkID      string

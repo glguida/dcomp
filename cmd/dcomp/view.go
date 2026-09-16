@@ -81,6 +81,7 @@ type viewMountDocument struct {
 }
 
 type viewComponentDocument struct {
+	User           string                   `json:"user,omitempty"`
 	Name           string                   `json:"name"`
 	ImageRef       string                   `json:"image_ref"`
 	ImageID        string                   `json:"image_id,omitempty"`
@@ -222,6 +223,7 @@ func viewComponent(
 	status *componentStatusDocument,
 ) viewComponentDocument {
 	component := viewComponentDocument{
+		User:           runtime.User,
 		Name:           name,
 		ImageRef:       imageRef,
 		ImageID:        imageID,

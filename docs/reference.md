@@ -105,6 +105,7 @@ its proxy endpoints, and starts the new container. Options:
 - `--arg VALUE` supplies one literal command argument; repeatable. Use
   `--arg=--option` for arguments beginning with a dash.
 - `--egress` enables the component's dedicated external network.
+- `--user UID:GID` overrides the image user with a numeric user and group.
 - `--publish PROTOCOL,HOST_IP,HOST_PORT,CONTAINER_PORT` publishes a port;
   repeatable, and requires `--egress`.
 
@@ -401,6 +402,7 @@ component INSTANCE PATH
 bind INSTANCE SOURCE TARGET ro|rw
 volume INSTANCE LOGICAL_NAME TARGET ro|rw
 args INSTANCE ARG...
+user INSTANCE UID:GID
 publish INSTANCE tcp|udp HOST_IP HOST_PORT CONTAINER_PORT
 egress INSTANCE
 global NAME SERVICE [INSTANCE.OUTPUT]
@@ -409,7 +411,7 @@ link INSTANCE.INPUT INSTANCE.OUTPUT|@GLOBAL
 
 `system` is required exactly once, and an empty system is allowed.
 Although final graph validation is order-independent, put `system` first and
-declare a component before any `bind`, `volume`, `args`, `publish`, or `egress`
+declare a component before any `bind`, `volume`, `args`, `user`, `publish`, or `egress`
 directive referring to it.
 
 ### `component`
@@ -472,6 +474,11 @@ absolute source becomes deployment identity.
 must not overlap one another or the reserved `/run/dcomp` tree. `ro` and `rw`
 control the filesystem mount and do not affect DComp socket stream direction.
 
+The source must exist when preparing a new or recreated container. Incremental
+edits retain existing containers' recorded mounts even if their host source
+was subsequently moved or removed. Such a path does not block unrelated adds,
+rewiring, or removal; recreating that container still requires its mount source.
+
 ### `volume`
 
 ```text
@@ -493,6 +500,19 @@ Replace the image command arguments without changing its entrypoint. Exactly
 one `args` directive may be supplied per component and it must contain at least
 one argument. Arguments are literal tokens; DComp performs no shell parsing or
 expansion.
+
+### `user`
+
+```text
+user INSTANCE UID:GID
+```
+
+Run the component as this numeric user and primary group instead of the image's
+default user. Both IDs must be canonical unsigned decimal values below
+4294967295. The setting is optional and may be supplied once per component.
+It is included in the component identity; changing it replaces the container.
+DComp neither changes ownership of mounted files nor remaps host user IDs.
+For a host workspace, select the UID/GID of the host user who owns its files.
 
 ### `egress`
 

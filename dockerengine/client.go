@@ -223,6 +223,7 @@ func (client *Client) InspectContainer(ctx context.Context, idOrName string) (en
 		Name   string `json:"Name"`
 		Image  string `json:"Image"`
 		Config struct {
+			User      string            `json:"User"`
 			Labels    map[string]string `json:"Labels"`
 			Cmd       []string          `json:"Cmd"`
 			Env       []string          `json:"Env"`
@@ -316,7 +317,8 @@ func (client *Client) InspectContainer(ctx context.Context, idOrName string) (en
 		environment[key] = value
 	}
 	return engine.Container{
-		ID: raw.ID, Name: strings.TrimPrefix(raw.Name, "/"), ImageID: raw.Image,
+		User: raw.Config.User,
+		ID:   raw.ID, Name: strings.TrimPrefix(raw.Name, "/"), ImageID: raw.Image,
 		Labels: cloneMap(raw.Config.Labels), Status: raw.State.Status,
 		Running: raw.State.Running, ExitCode: raw.State.ExitCode,
 		Error: raw.State.Error, Health: health, Networks: networks,
@@ -388,6 +390,7 @@ func (client *Client) CreateContainer(ctx context.Context, request engine.Contai
 	}
 
 	body := struct {
+		User         string              `json:"User,omitempty"`
 		Image        string              `json:"Image"`
 		Env          []string            `json:"Env,omitempty"`
 		Cmd          *[]string           `json:"Cmd,omitempty"`
@@ -413,7 +416,7 @@ func (client *Client) CreateContainer(ctx context.Context, request engine.Contai
 			EndpointsConfig map[string]endpointSettings `json:"EndpointsConfig"`
 		} `json:"NetworkingConfig,omitempty"`
 	}{
-		Image: request.ImageID, Env: environment,
+		Image: request.ImageID, User: request.User, Env: environment,
 		OpenStdin: true, StdinOnce: false, Tty: false,
 		ExposedPorts: exposedPorts, Labels: request.Labels, StopTimeout: &stopSeconds,
 	}

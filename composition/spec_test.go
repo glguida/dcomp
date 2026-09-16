@@ -323,13 +323,6 @@ func TestValidateRuntimeRequiresCanonicalNonOverlappingResources(t *testing.T) {
 			message: "must be absolute",
 		},
 		{
-			name: "missing bind source",
-			mutate: func(runtime *Runtime) {
-				runtime.Binds[0].Source = filepath.Join(canonicalRoot, "missing")
-			},
-			message: "must exist",
-		},
-		{
 			name: "overlapping mount",
 			mutate: func(runtime *Runtime) {
 				runtime.Volumes[0].Target = "/workspace/state"

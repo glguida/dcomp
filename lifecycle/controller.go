@@ -89,6 +89,11 @@ func (controller *Controller) Check(
 	if err := controller.validate(); err != nil {
 		return composition.ResolvedSpec{}, err
 	}
+	for _, instance := range spec.Components {
+		if err := composition.ValidateBindSources(instance.Runtime); err != nil {
+			return composition.ResolvedSpec{}, fmt.Errorf("component %s: %w", instance.Name, err)
+		}
+	}
 	return controller.resolve(ctx, spec)
 }
 
@@ -142,6 +147,18 @@ func (controller *Controller) applyResolved(
 	previous, exists, err := controller.State.ReadDesired(resolved.Name)
 	if err != nil {
 		return err
+	}
+	previousDigests := make(map[string]string)
+	for _, component := range previous.Spec.Components {
+		previousDigests[component.Name] = component.Digest
+	}
+	for _, component := range resolved.Components {
+		if previousDigests[component.Name] == component.Digest {
+			continue
+		}
+		if err := composition.ValidateBindSources(component.Runtime); err != nil {
+			return fmt.Errorf("component %s: %w", component.Name, err)
+		}
 	}
 	if exists {
 		matches, err := controller.deploymentMatches(ctx, previous, resolved)

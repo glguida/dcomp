@@ -42,7 +42,7 @@ dcomp version --json
 ```
 
 ```json
-{"version":"0.3.0","api_version":2}
+{"version":"0.3.1","api_version":2}
 ```
 
 - `version` is the DComp semantic version string.
@@ -196,6 +196,9 @@ An absent system is a successful observation with a non-operational result:
 The command exits 1 for this document because `operational` is false.
 
 ## View document
+
+A component includes optional `user` when its runtime specifies a numeric
+`UID:GID`. Absence means the image's default user.
 
 ```text
 dcomp [GLOBAL_OPTIONS] view --json FILE|NAME

@@ -1256,6 +1256,9 @@ func (controller *Controller) ensureContainer(
 	if err != nil {
 		return err
 	}
+	if err := composition.ValidateBindSources(component.Runtime); err != nil {
+		return fmt.Errorf("create component %s: %w", component.Name, err)
+	}
 	if err := controller.markPendingCreate(operation, pendingKey); err != nil {
 		return err
 	}
@@ -1263,6 +1266,7 @@ func (controller *Controller) ensureContainer(
 	actual, createErr := controller.Engine.CreateContainer(
 		callCtx,
 		engine.ContainerRequest{
+			User:           component.Runtime.User,
 			Name:           name,
 			ImageID:        component.ImageID,
 			NetworkID:      networkID,
