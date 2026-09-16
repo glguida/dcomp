@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/glguida/dcomp/hostfs"
 	"io"
 	"net"
 	"os"
@@ -93,7 +94,7 @@ func prepareSocketPublication(
 			return nil, err
 		}
 	}
-	if err := os.MkdirAll(filepath.Dir(bindPath), 0700); err != nil {
+	if err := hostfs.SocketDirectory(filepath.Dir(bindPath), runtimeDir); err != nil {
 		return nil, fmt.Errorf("create shortened socket directory: %w", err)
 	}
 	if err := validateSocketDirectory(filepath.Dir(bindPath)); err != nil {
@@ -228,7 +229,7 @@ func validateSocketDirectory(path string) error {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("proxy socket directory %s is not a directory", path)
 	}
-	if err := os.Chmod(path, 0700); err != nil {
+	if err := hostfs.RestrictDirectory(path); err != nil {
 		return err
 	}
 	return nil
@@ -259,7 +260,7 @@ func renameNoReplace(oldPath, newPath string) error {
 
 func listenUnix(path string, mode os.FileMode) (net.Listener, error) {
 	listenPath := socketListenPath(path)
-	if err := os.MkdirAll(filepath.Dir(listenPath), 0700); err != nil {
+	if err := hostfs.SocketDirectory(filepath.Dir(listenPath), filepath.Dir(path)); err != nil {
 		return nil, err
 	}
 	if err := validateSocketDirectory(filepath.Dir(listenPath)); err != nil {
@@ -313,7 +314,7 @@ func listenUnixFresh(path string, mode os.FileMode) (net.Listener, error) {
 	if unixListener, ok := listener.(*net.UnixListener); ok {
 		unixListener.SetUnlinkOnClose(false)
 	}
-	if err := os.Chmod(path, mode); err != nil {
+	if err := os.Chmod(path, hostfs.Mode(path, mode)); err != nil {
 		_ = listener.Close()
 		_ = os.Remove(path)
 		return nil, err
@@ -368,7 +369,7 @@ func writeExclusive(path string, data []byte, mode os.FileMode) error {
 		_ = file.Close()
 		_ = os.Remove(temporary)
 	}()
-	if err := file.Chmod(mode); err != nil {
+	if err := file.Chmod(hostfs.Mode(path, mode)); err != nil {
 		return err
 	}
 	if _, err := file.Write(data); err != nil {
@@ -391,7 +392,7 @@ func writeAtomic(path string, data []byte, mode os.FileMode) error {
 	}
 	name := file.Name()
 	defer os.Remove(name)
-	if err := file.Chmod(mode); err != nil {
+	if err := file.Chmod(hostfs.Mode(path, mode)); err != nil {
 		_ = file.Close()
 		return err
 	}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/glguida/dcomp/hostfs"
 	"io"
 	"net"
 	"os"
@@ -133,7 +134,7 @@ func (manager *ProcessManager) Ensure(ctx context.Context, config Config) (Proce
 		}
 	}
 
-	if err := os.MkdirAll(config.RuntimeDir, 0700); err != nil {
+	if err := hostfs.MkdirAll(config.RuntimeDir, 0700); err != nil {
 		return Process{}, fmt.Errorf("create proxy runtime directory: %w", err)
 	}
 	encoded, err := json.MarshalIndent(config, "", "  ")
@@ -146,7 +147,7 @@ func (manager *ProcessManager) Ensure(ctx context.Context, config Config) (Proce
 		return Process{}, fmt.Errorf("write proxy config: %w", err)
 	}
 	logPath := filepath.Join(config.RuntimeDir, LogFileName)
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	logFile, err := hostfs.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
 		return Process{}, fmt.Errorf("open proxy log: %w", err)
 	}

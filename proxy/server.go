@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/glguida/dcomp/hostfs"
 	"io"
 	"log"
 	"net"
@@ -231,13 +232,13 @@ type resyncTransition struct {
 }
 
 func (server *server) prepare() error {
-	if err := os.MkdirAll(filepath.Join(server.runtimeDir, "in"), 0700); err != nil {
+	if err := hostfs.MkdirAll(filepath.Join(server.runtimeDir, "in"), 0700); err != nil {
 		return fmt.Errorf("create proxy input directory: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Join(server.runtimeDir, "out"), 0700); err != nil {
+	if err := hostfs.MkdirAll(filepath.Join(server.runtimeDir, "out"), 0700); err != nil {
 		return fmt.Errorf("create proxy output directory: %w", err)
 	}
-	if err := os.Chmod(server.runtimeDir, 0700); err != nil {
+	if err := hostfs.RestrictDirectory(server.runtimeDir); err != nil {
 		return fmt.Errorf("set proxy runtime permissions: %w", err)
 	}
 

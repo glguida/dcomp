@@ -25,6 +25,7 @@ import (
 const usageText = `dcomp runs systems of Docker components linked by protobuf interfaces.
 
 Usage:
+  dcomp init DIR [--group GROUP]
   dcomp version [--json]
   dcomp [--state-root DIR] [--runtime-root DIR] check FILE
   dcomp [--state-root DIR] [--runtime-root DIR] up FILE
@@ -74,6 +75,9 @@ func run(arguments []string) int {
 	}
 	command := args[0]
 	commandArgs := args[1:]
+	if command == "init" {
+		return runInit(commandArgs)
+	}
 	if command == "version" {
 		versionFlags := flag.NewFlagSet("dcomp version", flag.ContinueOnError)
 		versionFlags.SetOutput(os.Stderr)

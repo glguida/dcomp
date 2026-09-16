@@ -178,6 +178,10 @@ filesystem also works when `/var/run` and `/tmp` are different mounts. Docker
 still mounts the named runtime-tree file and the container address remains
 unchanged.
 
+For group-shared state, the hidden directory belongs to the selected group and
+its name uses the group ID. This gives every member the same shortened socket
+path when observing or replacing a proxy started by another member.
+
 The ownership ledger and anchors are disposable runtime metadata, not part of
 the machine API or durable DComp state format. They do not change endpoint
 paths, bind mounts, or the component wire contract.

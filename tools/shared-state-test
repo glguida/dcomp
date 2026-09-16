@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""Run as root in an isolated test container with Docker and the built binaries.
+
+Three subprocess identities exercise the normal CLI; no host accounts are made.
+"""
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+binary = str(Path(__file__).resolve().parents[1] / 'bin/dcomp')
+base = Path(sys.argv[1])
+base.chmod(0o777)
+docker_gid = Path('/var/run/docker.sock').stat().st_gid
+
+
+def run(uid, *args, success=True):
+    def identity():
+        os.setgroups([docker_gid, 65534] if uid != 12003 else [docker_gid])
+        os.setgid(12000)
+        os.setuid(uid)
+        os.umask(0o077)
+    result = subprocess.run([binary, *map(str,args)], preexec_fn=identity,
+                            capture_output=True, text=True, timeout=60)
+    if success and result.returncode:
+        raise AssertionError(f'uid={uid} {args}: code={result.returncode} {result.stdout} {result.stderr}')
+    if not success and not result.returncode:
+        raise AssertionError(f'uid={uid} unexpectedly succeeded: {args}')
+    return result.stdout
+
+
+for name in ('short', 'long-path-' * 12):
+    state = base / name / 'state'
+    run(12001, 'init', state, '--group', 'nogroup')
+    run(12002, 'init', state, '--group', 'nogroup')
+    source = base / 'system.dcomp'
+    source.write_text('system shared\nglobal inference_endpoint example.Provider\n')
+    source.chmod(0o644)
+    command = ('--state-root',state)
+    try:
+        run(12001,*command,'up',source)
+        assert json.loads(run(12002,*command,'view','--json','shared'))['proxy']['ready']
+        run(12002,*command,'assign-global','--service','example.Provider','shared','another','-')
+        view=json.loads(run(12001,*command,'view','--json','shared'))
+        assert {g['name'] for g in view['globals']} == {'inference_endpoint','another'}
+        run(12003,*command,'view','--json','shared',success=False)
+        run(12002,*command,'down','shared')
+        run(12002,*command,'up',source)
+        assert json.loads(run(12001,*command,'view','--json','shared'))['proxy']['ready']
+    finally:
+        run(12001,*command,'down','shared')
+    print(f'PASS: {name}: two group members initialize, edit, stop and restart; nonmember denied',flush=True)

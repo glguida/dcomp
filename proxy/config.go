@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/glguida/dcomp/hostfs"
 	"io"
 	"os"
 	"path/filepath"
@@ -430,10 +431,14 @@ func shortenedSocketPath(exposedPath string) string {
 		directory = filepath.Dir(directory)
 	}
 	root := filepath.Dir(directory)
+	anchor := fmt.Sprintf(".dcomp-proxy-%d", os.Getuid())
+	if gid, shared := hostfs.Group(directory); shared {
+		anchor = fmt.Sprintf(".dcomp-proxy-g%d", gid)
+	}
 	for {
 		candidate := filepath.Join(
 			root,
-			fmt.Sprintf(".dcomp-proxy-%d", os.Getuid()),
+			anchor,
 			hex.EncodeToString(sum[:16]),
 		)
 		if len(candidate) < 104 {

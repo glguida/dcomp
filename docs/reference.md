@@ -41,6 +41,31 @@ proxy binary; normally `dcomp-proxy` must be installed beside `dcomp`.
 
 ## Commands
 
+### `init`
+
+```text
+dcomp init DIR [--group GROUP]
+```
+
+Prepare a state directory and print a shell-quoted `export DCOMP_STATE_ROOT=...`.
+This command accepts options on either side of the directory argument, resolves
+the directory to an absolute path, and does not contact Docker or start a proxy.
+Copy the printed export into each shell that will use the setup.
+
+Without `--group`, new state is private to the current user. With `--group`,
+the named Unix group must exist and the caller must be a member (or root).
+New directories use that group with mode `2770`; durable files, locks, and
+proxy control files retain group access on later writes. The setgid directory
+bit carries this policy into newly created state and runtime subdirectories.
+
+Initialization is idempotent: existing state is preserved. A nonempty root
+keeps its permissions; specifying a conflicting group is an error. An empty
+directory can be initialized in place. Users must also be able to traverse
+existing parent directories and access the same local Docker Engine. Sharing
+the group grants control of the whole setup. No users or groups are created.
+Keep the default runtime root under the state directory, or separately prepare
+an explicitly overridden runtime root with the same group permissions.
+
 ### `version`
 
 ```text

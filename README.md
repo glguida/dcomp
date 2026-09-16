@@ -255,6 +255,10 @@ documents with a bundled topology viewer. See [System view](docs/view.md).
 
 Durable state defaults to `$XDG_STATE_HOME/dcomp` or
 `$HOME/.local/state/dcomp`; `--state-root` and `DCOMP_STATE_ROOT` override it.
+`dcomp init DIR [--group GROUP]` prepares private or group-shared state and
+prints the environment variable to export. Repeating it preserves existing
+state. Group members share control of the setup and must have access to the
+same local Docker Engine. See the [init reference](docs/reference.md#init).
 The root is bound to one Docker Engine ID and defines its own Docker resource
 namespace. Containers, egress networks, and named volumes use physical names
 beginning `dcomp.<namespace>.`; the namespace is the first 128 bits of SHA-256

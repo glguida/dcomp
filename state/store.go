@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/glguida/dcomp/hostfs"
 	"io"
 	"os"
 	"path/filepath"
@@ -218,7 +219,7 @@ func (store Store) acquire(ctx context.Context, name string, wait bool) (*Lock, 
 	if err := makeDirectoryDurable(directory, 0700); err != nil {
 		return nil, fmt.Errorf("create state directory: %w", err)
 	}
-	file, err := os.OpenFile(filepath.Join(directory, "lock"), os.O_CREATE|os.O_RDWR, 0600)
+	file, err := hostfs.OpenFile(filepath.Join(directory, "lock"), os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("open state lock: %w", err)
 	}
@@ -256,7 +257,7 @@ func (store Store) AcquireShared(ctx context.Context, name string) (*Lock, bool,
 	if err != nil {
 		return nil, false, err
 	}
-	file, err := os.OpenFile(filepath.Join(directory, "lock"), os.O_RDONLY, 0)
+	file, err := hostfs.OpenFile(filepath.Join(directory, "lock"), os.O_RDONLY, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, false, nil
 	}
@@ -298,7 +299,7 @@ func (store Store) AcquireAttachment(
 	if err != nil {
 		return nil, err
 	}
-	file, err := os.OpenFile(
+	file, err := hostfs.OpenFile(
 		filepath.Join(directory, "attach-"+component+".lock"),
 		os.O_CREATE|os.O_RDWR,
 		0600,
@@ -357,7 +358,7 @@ func (store Store) BindEngine(id string) error {
 		_ = temporary.Close()
 		_ = os.Remove(temporaryName)
 	}()
-	if err := temporary.Chmod(0600); err != nil {
+	if err := temporary.Chmod(hostfs.Mode(temporary.Name(), 0600)); err != nil {
 		return fmt.Errorf("set engine binding permissions: %w", err)
 	}
 	encoder := json.NewEncoder(temporary)
@@ -667,7 +668,7 @@ func (store Store) write(name, filename string, value interface{}) (returnErr er
 			_ = os.Remove(temporaryName)
 		}
 	}()
-	if err := temporary.Chmod(0600); err != nil {
+	if err := temporary.Chmod(hostfs.Mode(temporary.Name(), 0600)); err != nil {
 		return err
 	}
 	if _, err := temporary.Write(encoded); err != nil {
@@ -768,7 +769,7 @@ func makeDirectoryDurable(path string, mode os.FileMode) error {
 
 	for index := len(missing) - 1; index >= 0; index-- {
 		directory := missing[index]
-		if err := os.Mkdir(directory, mode); err != nil && !errors.Is(err, os.ErrExist) {
+		if err := hostfs.Mkdir(directory, mode); err != nil && !errors.Is(err, os.ErrExist) {
 			return err
 		}
 		info, err := os.Stat(directory)
