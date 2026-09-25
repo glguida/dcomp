@@ -1,4 +1,4 @@
-<img src="docs/assets/banner.svg" alt="dcomp — Components, wired by hand. A Docker component substrate. V0.3.1, MIT, Linux, Docker Engine 25+." width="100%">
+<img src="docs/assets/banner.svg" alt="dcomp — Components, wired by hand. A Docker component substrate. V0.3.2, MIT, Linux, Docker Engine 25+." width="100%">
 
 # DComp
 
@@ -183,6 +183,12 @@ independent stream pairs rather than broadcasting or merging bytes, so
 bidirectional protocols such as HTTP/2 and gRPC remain valid. Disconnected
 components may reconnect without restarting the proxy.
 
+Version 0.3.2 removes disconnected input and output sockets from pending
+queues before pairing them. This prevents a new request from being paired
+with a dead provider connection after the provider reconnects. The proxy
+preserves buffered data and the reply path of connections that only close
+their write side.
+
 The proxy creates every listener before reporting readiness. `dcomp up` waits
 for that readiness before creating or starting component containers.
 
@@ -280,6 +286,19 @@ proxy never rebinds a surviving endpoint identity, so Docker's per-file socket
 mounts retain the same inode and established streams on surviving links remain
 open.
 
+## Upgrade from 0.3.1 to 0.3.2
+
+The pending-connection fix requires a new proxy process. Installing the binaries
+does not replace a running proxy, and `dcomp restart NAME` restarts only the
+component containers.
+
+Run `dcomp down NAME`, install the 0.3.2 binaries, then recreate the system with
+`dcomp up path/to/system.dcomp`. For systems assembled incrementally, have the
+managing application recreate the composition instead. Named volumes survive
+`down`; keep the existing state root. Machine API 2, durable state, the proxy
+control protocol, and the component stream contract are unchanged from 0.3.1;
+component images and SDKs do not need rebuilding for this fix.
+
 ## Migration to 0.3.0
 
 Before upgrading, use the old binary to run `dcomp down NAME` for each system.
@@ -335,7 +354,7 @@ Per-link Docker bridges and `DCOMP_LINK_*` are removed completely.
 
 ## Deliberate limits
 
-DComp 0.3.1 provides no multi-host overlay, replicas, automatic failover,
+DComp 0.3.2 provides no multi-host overlay, replicas, automatic failover,
 encryption, arbitrary Docker option passthrough, secret store, image build/pull
 workflow, or long-lived control-plane daemon. Unix
 socket permissions are the local trust boundary; optional peer-credential

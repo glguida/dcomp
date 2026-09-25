@@ -42,7 +42,7 @@ dcomp version --json
 ```
 
 ```json
-{"version":"0.3.1","api_version":2}
+{"version":"0.3.2","api_version":2}
 ```
 
 - `version` is the DComp semantic version string.
