@@ -136,6 +136,13 @@ If either component disconnects, the stream pair is released. Subsequent
 connections are paired normally, allowing one component container to restart
 without restarting the proxy or its peers.
 
+Disconnected connections are also removed while waiting for a peer, on both
+inputs and outputs. Pairing skips connections that have already hung up, so a
+provider restart cannot leave dead queue entries ahead of its replacement.
+Waiting connections retain buffered bytes and write-half-close semantics: a
+client may finish sending its request before a provider arrives and still
+receive the response. Queue cleanup does not consume application data.
+
 ## Proxy process and readiness
 
 `dcomp-proxy` receives a strict JSON configuration containing the system,

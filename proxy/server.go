@@ -199,6 +199,7 @@ type endpointRuntime struct {
 
 type pendingConnection struct {
 	connection net.Conn
+	watchDone  chan struct{}
 }
 
 type streamPair struct {
@@ -206,6 +207,7 @@ type streamPair struct {
 	consumer net.Conn
 	producer net.Conn
 	metrics  *linkCounters
+	pending  *pendingConnection
 }
 
 type linkCounters struct {
@@ -401,32 +403,28 @@ func (server *server) registerInputLocked(inputKey string, connection net.Conn) 
 		return nil
 	}
 	outputKey := linkOutputKey(link)
-	if output := popPending(&server.pendingOutputs, outputKey); output != nil {
-		server.pendingOutputN.Add(-1)
-		return server.registerPairLocked(link, connection, output.connection)
+	if output := server.popLivePendingLocked(&server.pendingOutputs, outputKey, &server.pendingOutputN); output != nil {
+		pair := server.registerPairLocked(link, connection, output.connection)
+		pair.pending = output
+		return pair
 	}
 	key := linkKey(link)
-	server.pendingInputs[key] = append(
-		server.pendingInputs[key], &pendingConnection{connection: connection},
-	)
-	server.pendingInputN.Add(1)
+	server.queuePendingLocked(&server.pendingInputs, key, connection, &server.pendingInputN)
 	return nil
 }
 
 func (server *server) registerOutputLocked(outputKey string, connection net.Conn) *streamPair {
 	if link, input := server.popInputForOutputLocked(outputKey); input != nil {
-		server.pendingInputN.Add(-1)
-		return server.registerPairLocked(link, input.connection, connection)
+		pair := server.registerPairLocked(link, input.connection, connection)
+		pair.pending = input
+		return pair
 	}
 	if !server.outputHasConsumerLocked(outputKey) {
 		server.untrackLocked(connection)
 		_ = connection.Close()
 		return nil
 	}
-	server.pendingOutputs[outputKey] = append(
-		server.pendingOutputs[outputKey], &pendingConnection{connection: connection},
-	)
-	server.pendingOutputN.Add(1)
+	server.queuePendingLocked(&server.pendingOutputs, outputKey, connection, &server.pendingOutputN)
 	return nil
 }
 
@@ -446,7 +444,7 @@ func (server *server) popInputForOutputLocked(outputKey string) (Link, *pendingC
 		if linkOutputKey(link) != outputKey {
 			continue
 		}
-		if input := popPending(&server.pendingInputs, linkKey(link)); input != nil {
+		if input := server.popLivePendingLocked(&server.pendingInputs, linkKey(link), &server.pendingInputN); input != nil {
 			return link, input
 		}
 	}
@@ -491,6 +489,12 @@ func (server *server) registerPairLocked(
 
 func (server *server) runPair(pair *streamPair) {
 	defer server.connectionWG.Done()
+	// Pairing removes the queue entry under mu, then interrupts its watcher.
+	// Wait outside mu and clear that private deadline before application reads.
+	if pair.pending != nil {
+		<-pair.pending.watchDone
+		_ = pair.pending.connection.SetReadDeadline(time.Time{})
+	}
 	server.forwardWithMetrics(
 		server.runCtx,
 		linkInputKey(pair.link),
