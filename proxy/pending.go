@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"runtime"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -108,10 +109,14 @@ func waitPendingHangup(connection net.Conn) error {
 }
 
 func socketHangup(fd uintptr) (bool, error) {
-	// POLLHUP/POLLERR are reported even with no requested events. Readability
-	// alone is not disconnection: it may be queued data or a write-half-close.
+	// Readability alone is not disconnection: it may be queued data or a
+	// write-half-close. Only hangup and error events remove pending peers.
 	// RawConn.Read supplies the blocking wait through Go's socket poller.
 	fds := []unix.PollFd{{Fd: int32(fd)}}
+	if runtime.GOOS == "darwin" {
+		// Darwin needs a requested write filter to report full close as POLLHUP.
+		fds[0].Events = unix.POLLOUT
+	}
 	for {
 		_, err := unix.Poll(fds, 0)
 		if errors.Is(err, unix.EINTR) {
